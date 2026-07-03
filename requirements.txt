@@ -1,0 +1,34 @@
+# ─── Core LLM providers ───────────────────────────────
+anthropic>=0.40.0          # Anthropic Claude API
+openai>=1.50.0             # OpenAI + Ollama /v1 endpoint
+
+# ─── HTTP & Web ───────────────────────────────────────
+requests>=2.31.0           # HTTP клиент (Ollama, web_fetch)
+beautifulsoup4>=4.12.0     # Парсинг HTML в web_fetch
+
+# ─── Terminal UI ──────────────────────────────────────
+rich>=13.7.0               # Красивый вывод в терминале
+
+# ─── Data ─────────────────────────────────────────────
+numpy>=1.26.0              # Векторный поиск (vector_search.py)
+
+# ─── Config file support ──────────────────────────────
+pyyaml>=6.0.1              # Парсинг YAML конфигов
+tomli>=2.0.1               # Парсинг TOML (Python < 3.11)
+tomli-w>=1.0.0             # Запись TOML
+
+# ─── Testing ──────────────────────────────────────────
+pytest>=8.0.0              # Запуск тестов через test_run
+pytest-cov>=5.0.0          # Coverage отчёты
+
+# ─── Optional: faster readline on Linux ───────────────
+# readline уже встроен в Python на Linux/Mac
+# На Windows может потребоваться:
+# pyreadline3>=3.4.1
+prompt_toolkit>=3.0.0       # Надёжный промпт без бага с backspace
+
+# === Telegram Bot ===
+python-telegram-bot>=20.0    # Telegram бот
+
+# === Web Surfer ===
+trafilatura>=1.6.0           # Лучший парсер текста из HTML (опционально)
