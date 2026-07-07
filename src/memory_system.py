@@ -53,12 +53,6 @@ class MemorySystem:
                 data = json.load(f)
 
             for mem_id, mem_data in data.items():
-                # Приводим importance к int на случай если в JSON строка
-                if "importance" in mem_data:
-                    try:
-                        mem_data["importance"] = int(mem_data["importance"])
-                    except (TypeError, ValueError):
-                        mem_data["importance"] = 5
                 self.memories[mem_id] = MemoryEntry(**mem_data)
 
         except Exception:
@@ -162,7 +156,7 @@ class MemorySystem:
             results.append(mem)
 
         # Сортируем по важности и дате
-        results.sort(key=lambda m: (int(m.importance), m.updated_at), reverse=True)
+        results.sort(key=lambda m: (m.importance, m.updated_at), reverse=True)
 
         return results
 
@@ -237,7 +231,7 @@ class MemorySystem:
             Список записей
         """
         memories = list(self.memories.values())
-        memories.sort(key=lambda m: (int(m.importance), m.updated_at), reverse=True)
+        memories.sort(key=lambda m: (m.importance, m.updated_at), reverse=True)
         return memories[:limit]
 
     def get_context(self, max_entries: int = 10) -> str:

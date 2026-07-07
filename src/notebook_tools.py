@@ -30,7 +30,10 @@ class NotebookReadTool:
         try:
             path = Path(file_path)
             if not path.exists():
-                return ToolResult(success=False, output="", error=f"Файл не найден: {file_path}")
+                return ToolResult(
+                    success=False,
+                    error=f"Файл не найден: {file_path}",
+                )
 
             with open(path) as f:
                 notebook = json.load(f)
@@ -50,7 +53,7 @@ class NotebookReadTool:
             return ToolResult(success=True, output="\n".join(lines))
 
         except Exception as e:
-            return ToolResult(success=False, output="", error=str(e))
+            return ToolResult(success=False, error=str(e))
 
 
 @dataclass
@@ -64,12 +67,10 @@ class NotebookEditTool:
         self,
         file_path: str,
         cell_index: int,
-        new_content: str = "",
-        new_source: str = "",   # алиас — модель часто присылает new_source
+        new_content: str,
     ) -> ToolResult:
         """
         Редактировать ячейку.
-        new_source — алиас для new_content (модели часто присылают new_source).
 
         Args:
             file_path: Путь к .ipynb файлу
@@ -79,13 +80,13 @@ class NotebookEditTool:
         Returns:
             Результат выполнения
         """
-        if new_source and not new_content:
-            new_content = new_source
-
         try:
             path = Path(file_path)
             if not path.exists():
-                return ToolResult(success=False, output="", error=f"Файл не найден: {file_path}")
+                return ToolResult(
+                    success=False,
+                    error=f"Файл не найден: {file_path}",
+                )
 
             with open(path) as f:
                 notebook = json.load(f)
@@ -93,7 +94,10 @@ class NotebookEditTool:
             cells = notebook.get("cells", [])
 
             if cell_index < 0 or cell_index >= len(cells):
-                return ToolResult(success=False, output="", error=f"Неверный индекс ячейки: {cell_index}")
+                return ToolResult(
+                    success=False,
+                    error=f"Неверный индекс ячейки: {cell_index}",
+                )
 
             # Обновляем содержимое
             cells[cell_index]["source"] = new_content.split("\n")
@@ -108,7 +112,7 @@ class NotebookEditTool:
             )
 
         except Exception as e:
-            return ToolResult(success=False, output="", error=str(e))
+            return ToolResult(success=False, error=str(e))
 
 
 @dataclass
@@ -131,17 +135,9 @@ class NotebookCreateTool:
         try:
             path = Path(file_path)
 
-            # Базовая структура notebook с одной пустой ячейкой
+            # Базовая структура notebook
             notebook = {
-                "cells": [
-                    {
-                        "cell_type": "code",
-                        "execution_count": None,
-                        "metadata": {},
-                        "outputs": [],
-                        "source": []
-                    }
-                ],
+                "cells": [],
                 "metadata": {
                     "kernelspec": {
                         "display_name": "Python 3",
@@ -166,7 +162,7 @@ class NotebookCreateTool:
             )
 
         except Exception as e:
-            return ToolResult(success=False, output="", error=str(e))
+            return ToolResult(success=False, error=str(e))
 
 
 def create_notebook_tools() -> dict[str, any]:

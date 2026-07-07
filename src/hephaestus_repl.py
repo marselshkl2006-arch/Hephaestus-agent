@@ -39,29 +39,26 @@ class HephaestusPrompt:
 
     def get_input(self) -> str:
         try:
+            # Используем prompt_toolkit если доступен — он не теряет промпт при backspace
             try:
                 from prompt_toolkit import prompt as pt_prompt
                 from prompt_toolkit.styles import Style
-                from prompt_toolkit.keys import Keys
-                from prompt_toolkit.key_binding import KeyBindings
-
-                # Правильная обработка вставки текста (Ctrl+Shift+V, Shift+Insert)
-                style = Style.from_dict({
-                    "prompt": "bold ansired",
-                })
-
-                line = pt_prompt(
-                    [("class:prompt", "⚡ гефест> ")],
-                    style=style,
-                    enable_history_search=True,
-                    mouse_support=False,
-                    multiline=False,
-                )
-            except Exception:
+                style = Style.from_dict({"prompt": "bold ansired"})
+                line = pt_prompt("⚡ гефест> : ", style=style)
+            except ImportError:
+                # Fallback: явно печатаем промпт через print чтобы он не исчезал
                 import sys
-                sys.stdout.write("\033[1;31m⚡ гефест\033[0m\033[1;33m>\033[0m ")
+                sys.stdout.write("\033[1;31m⚡ гефест\033[0m\033[1;33m> \033[0m: ")
                 sys.stdout.flush()
                 line = input()
+
+            if len(line) > 100:
+                console.print("[dim]📋 большой текст обнаружен[/dim]")
+
+            if line.endswith("\\"):
+                self.multiline_buffer.append(line[:-1])
+                console.print("[dim]... (продолжение)[/dim]")
+                return self.get_input()
 
             if self.multiline_buffer:
                 self.multiline_buffer.append(line)
@@ -122,38 +119,15 @@ def show_tool_call(name: str, params: str) -> None:
     console.print(f"\n[bold red]⚒️  [/bold red][yellow]{name}[/yellow][dim]({params})[/dim]")
 
 def show_tool_result(output: str, success: bool = True) -> None:
-    # Диаграммы и многострочный вывод показываем полностью
-    DIAGRAM_MARKERS = ["📐", "📂", "🔗", "📊", "┌─", "├──", "└──", "│ "]
-    is_diagram = any(m in (output or "") for m in DIAGRAM_MARKERS)
-    is_multiline = (output or "").count("\n") > 3
-
     if success:
-        if is_diagram or is_multiline:
-            # Полный вывод для диаграмм и длинных результатов
-            console.print(f"   [green]✓[/green]")
-            console.print(output or "OK")
-        else:
-            preview = output[:300].replace("\n", " ") if output else "OK"
-            console.print(f"   [green]✓[/green] [dim]{preview}[/dim]")
+        preview = output[:200].replace("\n", " ") if output else "OK"
+        console.print(f"   [green]✓[/green] [dim]{preview}[/dim]")
     else:
-        console.print(f"   [red]✗[/red] [dim]{(output or '')[:300]}[/dim]")
+        console.print(f"   [red]✗[/red] [dim]{output[:200]}[/dim]")
 
 def show_thinking(text: str = "") -> None:
     if text:
         console.print(f"\n[dim]💭 {text.strip()[:200]}[/dim]")
-
-def show_debug(tool_name: str, params: dict, result, elapsed_ms: float) -> None:
-    """Отладочный вывод — показывает реальные данные о вызове инструмента."""
-    import json
-    console.print(f"\n[dim]🐛 DEBUG ── {tool_name} ──────────────────[/dim]")
-    console.print(f"[dim]  Параметры: {json.dumps(params, ensure_ascii=False, indent=2)}[/dim]")
-    console.print(f"[dim]  Время: {elapsed_ms:.1f}ms | Успех: {result.success}[/dim]")
-    if result.output:
-        preview = result.output[:300].replace("\n", "↵ ")
-        console.print(f"[dim]  Вывод: {preview}[/dim]")
-    if result.error:
-        console.print(f"[dim]  Ошибка: {result.error[:200]}[/dim]")
-    console.print(f"[dim]{'─' * 45}[/dim]")
 
 def print_response(text: str) -> None:
     console.print()
@@ -210,17 +184,6 @@ class HephaestusREPL:
 ## История
 - `/history` — последние команды
 
-## Цели
-- `/goal <цель>` — Goal Mode: агент планирует и выполняет сам до конца
-
-## Сессии
-- `/sessions` — список сохранённых сессий
-- `/save` — сохранить текущую сессию
-- `/load <id>` — загрузить сессию по ID
-
-## Обучение
-- `/learn` — статистика контекстного обучения
-
 ## Советы
 - Многострочный ввод: закончи строку на `\\`
 - Ctrl+C — прервать текущий запрос
@@ -267,11 +230,7 @@ class HephaestusREPL:
             try:
                 line = self.prompt.get_input()
             except EOFError:
-                if agent.messages:
-                    sid = agent.save_session()
-                    console.print(f"\n[bold yellow]⚡ До свидания![/bold yellow] [dim]Сессия: {sid}[/dim]\n")
-                else:
-                    show_success("\nДо свидания! ⚡")
+                show_success("\nДо свидания!")
                 break
             except KeyboardInterrupt:
                 show_info("\nПрервано")
@@ -288,13 +247,7 @@ class HephaestusREPL:
                 args = parts[1] if len(parts) > 1 else ""
 
                 if cmd in ("/exit", "/quit"):
-                    if agent.messages:
-                        sid = agent.save_session()
-                        console.print(f"\n[bold yellow]⚡ До свидания, Марсель![/bold yellow]")
-                        console.print(f"[dim]Сессия сохранена: [cyan]{sid}[/cyan][/dim]")
-                        console.print(f"[dim]Загрузить: /load {sid}[/dim]\n")
-                    else:
-                        show_success("До свидания! ⚡")
+                    show_success("До свидания! ⚡")
                     break
                 elif cmd == "/help":
                     self._show_help()
@@ -305,33 +258,6 @@ class HephaestusREPL:
                     show_success("История диалога очищена")
                 elif cmd == "/tools":
                     self._show_tools(agent)
-                elif cmd == "/goal":
-                    if not args:
-                        show_error("Укажи цель: /goal создай TODO приложение на Python")
-                    else:
-                        result = agent.pursue_goal(args)
-                        print_response(result)
-                elif cmd == "/sessions":
-                    sessions = agent.session_manager.list_sessions()
-                    if not sessions:
-                        show_info("Нет сохранённых сессий")
-                    else:
-                        console.print("\n[bold]Последние сессии:[/bold]")
-                        for s in sessions:
-                            console.print(f"  [cyan]{s['id']}[/cyan] — {s['summary']} ([dim]{s['messages']} сообщ.[/dim])")
-                        console.print()
-                elif cmd == "/load":
-                    if not args:
-                        show_error("Укажи ID сессии: /load ses_20260614_123456")
-                    elif agent.load_session(args):
-                        show_success(f"Сессия {args} загружена ({len(agent.messages)} сообщений)")
-                    else:
-                        show_error(f"Сессия {args} не найдена. Используй /sessions")
-                elif cmd == "/save":
-                    sid = agent.save_session()
-                    show_success(f"Сессия сохранена: {sid}")
-                elif cmd == "/learn":
-                    show_info(agent.learning.get_stats())
                 elif cmd == "/history":
                     if HAS_READLINE:
                         n = readline.get_current_history_length()

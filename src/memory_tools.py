@@ -85,7 +85,7 @@ class MemorySearchTool:
         query: str = "",
         type: str = "",
         tags: str = "",
-        min_importance: int = 0,
+        min_importance: int | str = 0,
     ) -> ToolResult:
         """
         Поиск записей в памяти.
@@ -100,13 +100,7 @@ class MemorySearchTool:
             Результат выполнения
         """
         try:
-            # Приводим к int — модель может прислать строку "0"
-            try:
-                min_importance = int(min_importance)
-            except (TypeError, ValueError):
-                min_importance = 0
-
-            tag_list = [t.strip() for t in str(tags).split(",") if t.strip()] if tags else None
+            tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
 
             results = self.memory_system.search(
                 query=query or None,
@@ -181,7 +175,10 @@ class MemoryUpdateTool:
             )
 
             if not entry:
-                return ToolResult(success=False, output="", error=f"Запись {mem_id} не найдена")
+                return ToolResult(
+                    success=False,
+                    error=f"Запись {mem_id} не найдена",
+                )
 
             return ToolResult(
                 success=True,
@@ -217,9 +214,15 @@ class MemoryDeleteTool:
             success = self.memory_system.delete(mem_id)
 
             if success:
-                return ToolResult(success=True, output=f"✅ Запись {mem_id} удалена из памяти")
+                return ToolResult(
+                    success=True,
+                    output=f"✅ Запись {mem_id} удалена из памяти",
+                )
             else:
-                return ToolResult(success=False, output="", error=f"Запись {mem_id} не найдена")
+                return ToolResult(
+                    success=False,
+                    error=f"Запись {mem_id} не найдена",
+                )
 
         except Exception as e:
             return ToolResult(success=False, output="", error=str(e))

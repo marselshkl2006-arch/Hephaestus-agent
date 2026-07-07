@@ -10,16 +10,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-# Используем единый ToolResult из real_tools
-try:
-    from .real_tools import ToolResult
-except ImportError:
-    @dataclass
-    class ToolResult:
-        """Результат выполнения инструмента."""
-        success: bool
-        output: str
-        error: str = ""
+@dataclass
+class ToolResult:
+    """Результат выполнения инструмента."""
+    success: bool
+    output: str
+    error: str = ""
 
 
 class SystemMonitorTool:

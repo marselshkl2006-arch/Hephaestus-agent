@@ -53,7 +53,7 @@ class CronCreateTool:
             )
 
         except Exception as e:
-            return ToolResult(success=False, output="", error=str(e))
+            return ToolResult(success=False, error=str(e))
 
 
 @dataclass
@@ -98,7 +98,7 @@ class CronListTool:
             return ToolResult(success=True, output="\n".join(lines))
 
         except Exception as e:
-            return ToolResult(success=False, output="", error=str(e))
+            return ToolResult(success=False, error=str(e))
 
 
 @dataclass
@@ -125,12 +125,18 @@ class CronDeleteTool:
             success = self.scheduler.delete(task_id)
 
             if success:
-                return ToolResult(success=True, output=f"✅ Задача {task_id} удалена")
+                return ToolResult(
+                    success=True,
+                    output=f"✅ Задача {task_id} удалена",
+                )
             else:
-                return ToolResult(success=False, output="", error=f"Задача {task_id} не найдена")
+                return ToolResult(
+                    success=False,
+                    error=f"Задача {task_id} не найдена",
+                )
 
         except Exception as e:
-            return ToolResult(success=False, output="", error=str(e))
+            return ToolResult(success=False, error=str(e))
 
 
 def create_cron_tools(storage_path: Path | None = None) -> dict[str, any]:

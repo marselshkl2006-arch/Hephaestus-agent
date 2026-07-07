@@ -53,7 +53,7 @@ class SkillRegisterTool:
             )
 
         except Exception as e:
-            return ToolResult(success=False, output="", error=str(e))
+            return ToolResult(success=False, error=str(e))
 
 
 @dataclass
@@ -95,7 +95,7 @@ class SkillListTool:
             return ToolResult(success=True, output="\n".join(lines))
 
         except Exception as e:
-            return ToolResult(success=False, output="", error=str(e))
+            return ToolResult(success=False, error=str(e))
 
 
 @dataclass
@@ -129,7 +129,7 @@ class SkillExecuteTool:
             )
 
         except Exception as e:
-            return ToolResult(success=False, output="", error=str(e))
+            return ToolResult(success=False, error=str(e))
 
 
 @dataclass
@@ -156,7 +156,10 @@ class SkillUnregisterTool:
             success = self.skill_system.unregister(skill_id)
 
             if success:
-                return ToolResult(success=True, output=f"✅ Навык {skill_id} удален")
+                return ToolResult(
+                    success=True,
+                    output=f"✅ Навык {skill_id} удален",
+                )
             else:
                 return ToolResult(
                     success=False,
@@ -164,7 +167,7 @@ class SkillUnregisterTool:
                 )
 
         except Exception as e:
-            return ToolResult(success=False, output="", error=str(e))
+            return ToolResult(success=False, error=str(e))
 
 
 def create_skill_tools(skills_dir: Path | None = None) -> dict[str, any]:
