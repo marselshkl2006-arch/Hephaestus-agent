@@ -181,10 +181,7 @@ class MemoryUpdateTool:
             )
 
             if not entry:
-                return ToolResult(
-                    success=False,
-                    error=f"Запись {mem_id} не найдена",
-                )
+                return ToolResult(success=False, output="", error=f"Запись {mem_id} не найдена")
 
             return ToolResult(
                 success=True,
@@ -220,15 +217,9 @@ class MemoryDeleteTool:
             success = self.memory_system.delete(mem_id)
 
             if success:
-                return ToolResult(
-                    success=True,
-                    output=f"✅ Запись {mem_id} удалена из памяти",
-                )
+                return ToolResult(success=True, output=f"✅ Запись {mem_id} удалена из памяти")
             else:
-                return ToolResult(
-                    success=False,
-                    error=f"Запись {mem_id} не найдена",
-                )
+                return ToolResult(success=False, output="", error=f"Запись {mem_id} не найдена")
 
         except Exception as e:
             return ToolResult(success=False, output="", error=str(e))

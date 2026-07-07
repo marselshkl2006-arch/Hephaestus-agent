@@ -552,10 +552,27 @@ class HephaestusAgent:
             if tool_name == "bash":
                 return tool.execute(kwargs.get("command", ""))
             elif tool_name == "file_read":
-                fp = kwargs.get("file_path") or kwargs.get("path") or kwargs.get("filename") or ""
+                fp = kwargs.get("file_path") or kwargs.get("filename") or ""
+                # Если path — папка, а filename отдельно
+                path_arg = kwargs.get("path", "")
+                if not fp and path_arg:
+                    fname = kwargs.get("filename", "")
+                    if fname and not path_arg.endswith(fname):
+                        import os as _os
+                        fp = _os.path.join(path_arg.rstrip("/"), fname)
+                    else:
+                        fp = path_arg
                 return tool.read(fp)
             elif tool_name == "file_write":
-                fp = kwargs.get("file_path") or kwargs.get("path") or kwargs.get("filename") or ""
+                fp = kwargs.get("file_path") or kwargs.get("filename") or ""
+                path_arg = kwargs.get("path", "")
+                if not fp and path_arg:
+                    fname = kwargs.get("filename", "")
+                    if fname and not path_arg.endswith(fname):
+                        import os as _os
+                        fp = _os.path.join(path_arg.rstrip("/"), fname)
+                    else:
+                        fp = path_arg
                 content = kwargs.get("content") or kwargs.get("text") or kwargs.get("data") or ""
                 if fp:
                     from pathlib import Path as _P
@@ -569,13 +586,17 @@ class HephaestusAgent:
             elif tool_name == "file_delete":
                 fp = kwargs.get("file_path") or kwargs.get("path") or kwargs.get("filename") or ""
                 return tool.delete(fp)
-            elif tool_name == "file_move":
-                src = kwargs.get("source") or kwargs.get("src") or kwargs.get("src_path") or kwargs.get("from") or ""
-                dst = kwargs.get("destination") or kwargs.get("dst") or kwargs.get("dst_path") or kwargs.get("to") or ""
+            elif tool_name in ("file_move", "file_rename"):
+                src = (kwargs.get("source") or kwargs.get("src") or kwargs.get("src_path") or
+                       kwargs.get("from") or kwargs.get("file_path") or "")
+                dst = (kwargs.get("destination") or kwargs.get("dst") or kwargs.get("dst_path") or
+                       kwargs.get("to") or kwargs.get("new_path") or "")
                 return tool.move(src, dst)
             elif tool_name == "file_copy":
-                src = kwargs.get("source") or kwargs.get("src") or kwargs.get("src_path") or kwargs.get("from") or ""
-                dst = kwargs.get("destination") or kwargs.get("dst") or kwargs.get("dst_path") or kwargs.get("to") or ""
+                src = (kwargs.get("source") or kwargs.get("src") or kwargs.get("src_path") or
+                       kwargs.get("from") or kwargs.get("file_path") or "")
+                dst = (kwargs.get("destination") or kwargs.get("dst") or kwargs.get("dst_path") or
+                       kwargs.get("to") or kwargs.get("new_path") or "")
                 return tool.copy(src, dst)
             elif tool_name == "file_exists":
                 fp = kwargs.get("path") or kwargs.get("file_path") or kwargs.get("filename") or ""
@@ -630,6 +651,19 @@ class HephaestusAgent:
                 elif action == "delete":
                     mem_id = (kwargs.get("mem_id") or kwargs.get("id") or
                               kwargs.get("memory_id") or "")
+                    # Если передали текст вместо ID — ищем по содержимому
+                    if not mem_id or not mem_id.startswith("mem_"):
+                        search_query = (mem_id or kwargs.get("text") or
+                                        kwargs.get("content") or kwargs.get("query") or "")
+                        if search_query:
+                            search_tool = self.tools.get("memory_search")
+                            if search_tool:
+                                sr = search_tool.execute(query=search_query)
+                                if sr.success and "mem_" in (sr.output or ""):
+                                    import re as _re
+                                    found = _re.search("mem_[0-9]+_[0-9]+", sr.output)
+                                    if found:
+                                        mem_id = found.group()
                     return tool.execute(mem_id=mem_id)
             elif tool_name.startswith("task_"):
                 action = tool_name.split("_", 1)[1]
@@ -675,15 +709,23 @@ class HephaestusAgent:
                 elif action == "execute":
                     skill_id = (kwargs.get("skill_id") or kwargs.get("id") or
                                 kwargs.get("name") or "")
-                    # Если передали имя навыка — конвертируем в skill_ID формат
-                    if skill_id and not skill_id.startswith("skill_"):
-                        skill_id_candidate = f"skill_{skill_id.lower().replace(' ', '_')}"
-                        # Проверяем что такой навык есть
+                    # Конвертируем имя в ID
+                    if skill_id:
                         list_tool = self.tools.get("skill_list")
                         if list_tool:
-                            list_res = list_tool.execute()
-                            if skill_id_candidate in (list_res.output or ""):
-                                skill_id = skill_id_candidate
+                            list_res = list_tool.execute() or type("R", (), {"output": ""})()
+                            out = list_res.output or ""
+                            # Пробуем разные варианты ID
+                            candidates = [
+                                skill_id,
+                                f"skill_{skill_id}",
+                                f"skill_{skill_id.lower().replace(' ', '_')}",
+                                f"skill_{skill_id.lower().replace('-', '_')}",
+                            ]
+                            for c in candidates:
+                                if c in out:
+                                    skill_id = c
+                                    break
                     return tool.execute(skill_id=skill_id)
             elif tool_name.startswith("notebook_"):
                 action = tool_name.split("_", 1)[1]
@@ -698,7 +740,10 @@ class HephaestusAgent:
                         return t.execute(file_path=fp)
                 elif action == "read":
                     t = self.tools.get("notebook_read") or tool
-                    if t: return t.execute(file_path=kwargs.get("file_path", ""))
+                    if t:
+                        fp = (kwargs.get("file_path") or kwargs.get("path") or
+                              kwargs.get("filename") or "")
+                        return t.execute(file_path=fp)
                 elif action == "edit":
                     t = self.tools.get("notebook_edit") or tool
                     if t: return t.execute(
@@ -737,12 +782,20 @@ class HephaestusAgent:
             # === БАЗА ДАННЫХ ===
             elif tool_name == "db_query":
                 t = self.tools.get("database")
-                if t: return t.query(database=kwargs.get("database",""),
-                    query=kwargs.get("query",""), db_type=kwargs.get("db_type","sqlite"))
+                if t:
+                    db = (kwargs.get("database") or kwargs.get("database_path") or
+                          kwargs.get("db_path") or kwargs.get("path") or "")
+                    if db:
+                        from pathlib import Path as _P
+                        _P(db).parent.mkdir(parents=True, exist_ok=True)
+                    return t.query(database=db,
+                        query=kwargs.get("query",""), db_type=kwargs.get("db_type","sqlite"))
             elif tool_name == "db_schema":
                 t = self.tools.get("database")
-                if t: return t.get_schema(database=kwargs.get("database",""),
-                    db_type=kwargs.get("db_type","sqlite"))
+                if t:
+                    db = (kwargs.get("database") or kwargs.get("database_path") or
+                          kwargs.get("db_path") or "")
+                    return t.get_schema(database=db, db_type=kwargs.get("db_type","sqlite"))
 
             # === OCR ===
             elif tool_name == "ocr_extract":
