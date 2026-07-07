@@ -27,9 +27,6 @@ class NotebookReadTool:
         Returns:
             Результат выполнения
         """
-        if new_source and not new_content:
-            new_content = new_source
-
         try:
             path = Path(file_path)
             if not path.exists():
@@ -134,9 +131,17 @@ class NotebookCreateTool:
         try:
             path = Path(file_path)
 
-            # Базовая структура notebook
+            # Базовая структура notebook с одной пустой ячейкой
             notebook = {
-                "cells": [],
+                "cells": [
+                    {
+                        "cell_type": "code",
+                        "execution_count": None,
+                        "metadata": {},
+                        "outputs": [],
+                        "source": []
+                    }
+                ],
                 "metadata": {
                     "kernelspec": {
                         "display_name": "Python 3",

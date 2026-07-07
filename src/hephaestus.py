@@ -214,6 +214,12 @@ ALL_TOOL_SCHEMAS: dict[str, dict] = {
             "subject": {"type": "string"}
         }, "required": ["task_id"]}
     },
+    "notebook_create": {
+        "description": "Создать новый пустой Jupyter notebook",
+        "input_schema": {"type": "object", "properties": {
+            "file_path": {"type": "string", "description": "Путь к новому .ipynb файлу"}
+        }, "required": ["file_path"]}
+    },
     "notebook_read": {
         "description": "Прочитать Jupyter notebook",
         "input_schema": {"type": "object", "properties": {"file_path": {"type": "string"}}, "required": ["file_path"]}
@@ -237,6 +243,12 @@ ALL_TOOL_SCHEMAS: dict[str, dict] = {
     "cron_list": {
         "description": "Список cron задач",
         "input_schema": {"type": "object", "properties": {}, "required": []}
+    },
+    "cron_delete": {
+        "description": "Удалить cron задачу по ID",
+        "input_schema": {"type": "object", "properties": {
+            "task_id": {"type": "string", "description": "ID cron задачи (например task_1_123456)"}
+        }, "required": ["task_id"]}
     },
     "skill_register": {
         "description": "Зарегистрировать новый навык — скрипт или файл",
@@ -502,7 +514,7 @@ class HephaestusAgent:
     def _get_tools_schema(self) -> list[dict]:
         """JSON Schema только для подключённых инструментов."""
         # Инструменты реализованные не напрямую через self.tools[name]
-        ALWAYS_INCLUDE = {'docker_list', 'doc_readme', 'doc_generate', 'github_workflow', 'notebook_edit', 'docker_stop', 'db_schema', 'doc_docstrings', 'diagram_class', 'diagram_flowchart', 'git', 'docker_exec', 'ocr_extract', 'ocr_status', 'ocr_languages', 'docker_logs', 'db_query', 'docker_run'}
+        ALWAYS_INCLUDE = {'docker_list', 'doc_readme', 'doc_generate', 'github_workflow', 'notebook_edit', 'notebook_create', 'notebook_read', 'cron_delete', 'docker_stop', 'db_schema', 'doc_docstrings', 'diagram_class', 'diagram_flowchart', 'git', 'docker_exec', 'ocr_extract', 'ocr_status', 'ocr_languages', 'docker_logs', 'db_query', 'docker_run'}
 
         schemas = []
         for name, schema in ALL_TOOL_SCHEMAS.items():

@@ -68,13 +68,8 @@ class DatabaseQueryTool:
         """Запрос к SQLite."""
         try:
             db_path = Path(database)
-            if not db_path.exists():
-                return ToolResult(
-                    success=False,
-                    output="",
-                    error=f"Database not found: {database}"
-                )
-
+            # Создаём директорию и файл если не существует (для CREATE TABLE)
+            db_path.parent.mkdir(parents=True, exist_ok=True)
             conn = sqlite3.connect(str(db_path))
             cursor = conn.cursor()
 
@@ -297,7 +292,7 @@ class DatabaseQueryTool:
                 return ToolResult(
                     success=False,
                     output="",
-                    error=f"Database not found: {database}"
+                    error=f"База данных не найдена: {database}. Сначала создайте таблицу через db_query."
                 )
 
             conn = sqlite3.connect(str(db_path))

@@ -256,25 +256,75 @@ class WebSearchTool:
             return self._fallback_search(query)
 
     def _fallback_search(self, query: str) -> list[SearchResult]:
-        """Fallback поиск - возвращает ссылки на поисковики."""
+        """Реальный поиск через DuckDuckGo Instant Answer API (бесплатно, без ключа)."""
         import urllib.parse
-        encoded_query = urllib.parse.quote(query)
+        results = []
 
+        # Пробуем DuckDuckGo Instant Answer API
+        try:
+            import requests as _req
+            encoded = urllib.parse.quote(query)
+            # DuckDuckGo HTML поиск
+            url = f"https://html.duckduckgo.com/html/?q={encoded}"
+            headers = {"User-Agent": "Mozilla/5.0 (compatible; HephaestusBot/1.0)"}
+            resp = _req.get(url, headers=headers, timeout=10)
+            if resp.status_code == 200:
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(resp.text, "html.parser")
+                for result_div in soup.select(".result__body")[:8]:
+                    title_el = result_div.select_one(".result__title")
+                    url_el = result_div.select_one(".result__url")
+                    snippet_el = result_div.select_one(".result__snippet")
+                    if title_el and url_el:
+                        title = title_el.get_text(strip=True)
+                        href = title_el.select_one("a")
+                        link = href["href"] if href and href.get("href") else str(url_el.get_text(strip=True))
+                        # Убираем DuckDuckGo redirect
+                        if "uddg=" in link:
+                            link = urllib.parse.unquote(link.split("uddg=")[1].split("&")[0])
+                        snippet = snippet_el.get_text(strip=True) if snippet_el else ""
+                        results.append(SearchResult(title=title, url=link, snippet=snippet))
+                if results:
+                    return results
+        except Exception:
+            pass
+
+        # Fallback на Bing (парсинг HTML)
+        try:
+            import requests as _req
+            encoded = urllib.parse.quote(query)
+            url = f"https://www.bing.com/search?q={encoded}"
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+            resp = _req.get(url, headers=headers, timeout=10)
+            if resp.status_code == 200:
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(resp.text, "html.parser")
+                for li in soup.select("li.b_algo")[:6]:
+                    h2 = li.select_one("h2 a")
+                    snippet_el = li.select_one(".b_caption p")
+                    if h2:
+                        results.append(SearchResult(
+                            title=h2.get_text(strip=True),
+                            url=h2.get("href", ""),
+                            snippet=snippet_el.get_text(strip=True) if snippet_el else ""
+                        ))
+                if results:
+                    return results
+        except Exception:
+            pass
+
+        # Последний fallback — хотя бы ссылки
+        encoded_query = urllib.parse.quote(query)
         return [
             SearchResult(
-                title=f"Поиск в Google: {query}",
-                url=f"https://www.google.com/search?q={encoded_query}",
-                snippet="Откройте эту ссылку в браузере для поиска в Google"
-            ),
-            SearchResult(
-                title=f"Поиск в DuckDuckGo: {query}",
+                title=f"DuckDuckGo: {query}",
                 url=f"https://duckduckgo.com/?q={encoded_query}",
-                snippet="Откройте эту ссылку в браузере для поиска в DuckDuckGo"
+                snippet="Откройте для поиска в DuckDuckGo"
             ),
             SearchResult(
-                title=f"Поиск в Яндекс: {query}",
-                url=f"https://yandex.ru/search/?text={encoded_query}",
-                snippet="Откройте эту ссылку в браузере для поиска в Яндекс"
+                title=f"Google: {query}",
+                url=f"https://www.google.com/search?q={encoded_query}",
+                snippet="Откройте для поиска в Google"
             ),
         ]
 

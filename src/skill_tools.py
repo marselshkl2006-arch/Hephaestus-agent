@@ -53,7 +53,7 @@ class SkillRegisterTool:
             )
 
         except Exception as e:
-            return ToolResult(success=False, error=str(e))
+            return ToolResult(success=False, output="", error=str(e))
 
 
 @dataclass
@@ -95,7 +95,7 @@ class SkillListTool:
             return ToolResult(success=True, output="\n".join(lines))
 
         except Exception as e:
-            return ToolResult(success=False, error=str(e))
+            return ToolResult(success=False, output="", error=str(e))
 
 
 @dataclass
@@ -129,7 +129,7 @@ class SkillExecuteTool:
             )
 
         except Exception as e:
-            return ToolResult(success=False, error=str(e))
+            return ToolResult(success=False, output="", error=str(e))
 
 
 @dataclass
