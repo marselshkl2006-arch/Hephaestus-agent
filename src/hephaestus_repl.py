@@ -128,6 +128,19 @@ def show_thinking(text: str = "") -> None:
     if text:
         console.print(f"\n[dim]💭 {text.strip()[:200]}[/dim]")
 
+def show_debug(tool_name: str, params: dict, result, elapsed_ms: float) -> None:
+    """Отладочный вывод — показывает реальные данные о вызове инструмента."""
+    import json
+    console.print(f"\n[dim]🐛 DEBUG ── {tool_name} ──────────────────[/dim]")
+    console.print(f"[dim]  Параметры: {json.dumps(params, ensure_ascii=False, indent=2)}[/dim]")
+    console.print(f"[dim]  Время: {elapsed_ms:.1f}ms | Успех: {result.success}[/dim]")
+    if result.output:
+        preview = result.output[:300].replace("\n", "↵ ")
+        console.print(f"[dim]  Вывод: {preview}[/dim]")
+    if result.error:
+        console.print(f"[dim]  Ошибка: {result.error[:200]}[/dim]")
+    console.print(f"[dim]{'─' * 45}[/dim]")
+
 def print_response(text: str) -> None:
     console.print()
     console.print(Markdown(text))

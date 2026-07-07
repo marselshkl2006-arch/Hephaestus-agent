@@ -34,7 +34,7 @@ from .hephaestus_repl import (
     HephaestusREPL,
     ForgeSpinner,
     show_success, show_error, show_warning, show_info,
-    show_tool_call, show_tool_result, show_thinking, print_response,
+    show_tool_call, show_tool_result, show_thinking, show_debug, print_response,
     console,
 )
 
@@ -77,9 +77,9 @@ def _load_database_tools():
     from .database_tools import DatabaseQueryTool
     return {"database": DatabaseQueryTool()}
 
-def _load_system_tools():
-    from .system_tools import SystemMonitorTool, LogAnalyzerTool
-    return {"system_monitor": SystemMonitorTool(), "log_analyzer": LogAnalyzerTool()}
+def _load_ocr_tools():
+    from .ocr_tool import OCRTool
+    return {"ocr": OCRTool()}
 
 def _load_diagram_tools():
     from .diagram_generator import DiagramGenerator
@@ -311,12 +311,21 @@ ALL_TOOL_SCHEMAS: dict[str, dict] = {
     },
 
     # === СИСТЕМА ===
-    "system_monitor": {
-        "description": "Мониторинг системы: CPU, память, диск, процессы, сеть",
+    "ocr_extract": {
+        "description": "Распознать текст с изображения (OCR). Поддерживает png, jpg, bmp, tiff",
         "input_schema": {"type": "object", "properties": {
-            "target": {"type": "string", "description": "Что мониторить: all, cpu, memory, disk, processes, network"},
-            "detailed": {"type": "boolean", "description": "Подробный вывод"}
-        }, "required": []}
+            "image_path": {"type": "string", "description": "Путь к изображению"},
+            "lang": {"type": "string", "description": "Язык: rus, eng, rus+eng (по умолчанию rus+eng)"},
+            "psm": {"type": "integer", "description": "Режим сегментации: 3=авто, 6=блок, 11=разреженный"}
+        }, "required": ["image_path"]}
+    },
+    "ocr_status": {
+        "description": "Проверить статус OCR — установлен ли Tesseract",
+        "input_schema": {"type": "object", "properties": {}, "required": []}
+    },
+    "ocr_languages": {
+        "description": "Список доступных языков для OCR",
+        "input_schema": {"type": "object", "properties": {}, "required": []}
     },
 
     # === ДИАГРАММЫ ===
@@ -463,6 +472,7 @@ class HephaestusAgent:
         self.llm_client = create_llm_client(llm_config)
         self.workspace_root = Path(workspace_root or Path.cwd()).resolve()
         self.auto_approve = auto_approve
+        self.debug = False  # включается через --debug
         self.messages: list[LLMMessage] = []
 
         self._init_tools()
@@ -484,7 +494,7 @@ class HephaestusAgent:
         self.tools.update(_try_import(_load_notebook_tools))
         self.tools.update(_try_import(_load_docker_tools))
         self.tools.update(_try_import(_load_database_tools))
-        self.tools.update(_try_import(_load_system_tools))
+        self.tools.update(_try_import(_load_ocr_tools))
         self.tools.update(_try_import(_load_diagram_tools))
         self.tools.update(_try_import(_load_doc_tools))
         self.tools.update(_try_import(_load_github_tools))
@@ -492,7 +502,7 @@ class HephaestusAgent:
     def _get_tools_schema(self) -> list[dict]:
         """JSON Schema только для подключённых инструментов."""
         # Инструменты реализованные не напрямую через self.tools[name]
-        ALWAYS_INCLUDE = {'docker_list', 'doc_readme', 'doc_generate', 'github_workflow', 'notebook_edit', 'docker_stop', 'db_schema', 'doc_docstrings', 'diagram_class', 'diagram_flowchart', 'git', 'docker_exec', 'system_monitor', 'docker_logs', 'db_query', 'docker_run'}
+        ALWAYS_INCLUDE = {'docker_list', 'doc_readme', 'doc_generate', 'github_workflow', 'notebook_edit', 'docker_stop', 'db_schema', 'doc_docstrings', 'diagram_class', 'diagram_flowchart', 'git', 'docker_exec', 'ocr_extract', 'ocr_status', 'ocr_languages', 'docker_logs', 'db_query', 'docker_run'}
 
         schemas = []
         for name, schema in ALL_TOOL_SCHEMAS.items():
@@ -628,11 +638,20 @@ class HephaestusAgent:
                 if t: return t.get_schema(database=kwargs.get("database",""),
                     db_type=kwargs.get("db_type","sqlite"))
 
-            # === СИСТЕМА ===
-            elif tool_name == "system_monitor":
-                t = self.tools.get("system_monitor")
-                if t: return t.monitor(target=kwargs.get("target","all"),
-                    detailed=kwargs.get("detailed", False))
+            # === OCR ===
+            elif tool_name == "ocr_extract":
+                t = self.tools.get("ocr")
+                if t: return t.extract_text(
+                    image_path=kwargs.get("image_path", ""),
+                    lang=kwargs.get("lang", "rus+eng"),
+                    psm=int(kwargs.get("psm", 3)),
+                )
+            elif tool_name == "ocr_status":
+                t = self.tools.get("ocr")
+                if t: return t.status()
+            elif tool_name == "ocr_languages":
+                t = self.tools.get("ocr")
+                if t: return t.get_languages()
 
             # === ДИАГРАММЫ ===
             elif tool_name == "diagram_class":
@@ -681,12 +700,12 @@ class HephaestusAgent:
         self.messages.append(LLMMessage(role="user", content=user_message))
 
         tools_schema = self._get_tools_schema()
-        # Добавляем подсказки контекстного обучения в промпт
         learning_hint = self.learning.get_context_hint()
         context_section = ("\n\n## Контекст из прошлого опыта:\n" + learning_hint) if learning_hint else ""
         dynamic_system = SYSTEM_PROMPT + context_section
         max_iterations = 10
-        last_tool_signatures: list[str] = []  # для детекта зацикливания
+        last_tool_signatures: list[str] = []
+        lazy_count = 0  # счётчик "ленивых" ответов подряд
 
         for iteration in range(max_iterations):
             try:
@@ -717,9 +736,23 @@ class HephaestusAgent:
                 if len(last_tool_signatures) > 6:
                     last_tool_signatures.pop(0)
 
-            # Нет инструментов — финальный ответ
+            # Нет инструментов
             if not response.tool_use_blocks:
                 text = response.content if isinstance(response.content, str) else str(response.content)
+                # Если первая итерация и есть глаголы действия — принуждаем
+                action_words = ["создай", "сделай", "запусти", "выполни", "покажи", "найди",
+                                "удали", "скопируй", "переименуй", "добавь", "запомни",
+                                "create", "run", "execute", "show", "find", "delete", "search"]
+                is_action = any(w in self.messages[-1].content.lower() for w in action_words) if self.messages else False
+                if is_action and iteration == 0 and lazy_count < 2:
+                    lazy_count += 1
+                    self.messages.append(LLMMessage(role="assistant", content=text))
+                    self.messages.append(LLMMessage(
+                        role="user",
+                        content="ВНИМАНИЕ: ты должен использовать инструмент для выполнения этой задачи. "
+                                "Вызови нужный инструмент через JSON, не описывай как это сделать вручную."
+                    ))
+                    continue
                 self.messages.append(LLMMessage(role="assistant", content=text))
                 return text
 
@@ -737,9 +770,14 @@ class HephaestusAgent:
                 params = tool_call.get("input", {})
                 call_id = tool_call.get("id", f"call_{iteration}")
 
+                import time as _time
                 show_tool_call(name, json.dumps(params, ensure_ascii=False)[:100])
+                _t0 = _time.time()
                 result = self.execute_tool(name, **params)
+                _elapsed = (_time.time() - _t0) * 1000
                 show_tool_result(result.output or result.error or "", result.success)
+                if self.debug:
+                    show_debug(name, params, result, _elapsed)
                 # Контекстное обучение
                 if result.success:
                     self.learning.record_success(name, params)
@@ -801,6 +839,7 @@ def main():
     parser.add_argument("--auto-approve", action="store_true")
     parser.add_argument("--temperature", type=float, default=0.1)
     parser.add_argument("--no-logo", action="store_true", help="Без анимации логотипа")
+    parser.add_argument("--debug", action="store_true", help="Отладочный режим — показывает детали вызовов инструментов")
     args = parser.parse_args()
 
     # Провайдер
@@ -832,6 +871,7 @@ def main():
         workspace_root=args.workspace,
         auto_approve=args.auto_approve,
     )
+    agent.debug = getattr(args, "debug", False)
 
     if args.query:
         # Одиночный запрос
