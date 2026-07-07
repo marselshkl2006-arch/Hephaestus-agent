@@ -42,22 +42,26 @@ class HephaestusPrompt:
             try:
                 from prompt_toolkit import prompt as pt_prompt
                 from prompt_toolkit.styles import Style
-                prompt_str = "⚡ гефест> "
-                style = Style.from_dict({"": "bold ansired"})
-                line = pt_prompt(prompt_str, style=style)
+                from prompt_toolkit.keys import Keys
+                from prompt_toolkit.key_binding import KeyBindings
+
+                # Правильная обработка вставки текста (Ctrl+Shift+V, Shift+Insert)
+                style = Style.from_dict({
+                    "prompt": "bold ansired",
+                })
+
+                line = pt_prompt(
+                    [("class:prompt", "⚡ гефест> ")],
+                    style=style,
+                    enable_history_search=True,
+                    mouse_support=False,
+                    multiline=False,
+                )
             except Exception:
                 import sys
                 sys.stdout.write("\033[1;31m⚡ гефест\033[0m\033[1;33m>\033[0m ")
                 sys.stdout.flush()
                 line = input()
-
-            if len(line) > 100:
-                console.print("[dim]📋 большой текст обнаружен[/dim]")
-
-            if line.endswith("\\"):
-                self.multiline_buffer.append(line[:-1])
-                console.print("[dim]... (продолжение)[/dim]")
-                return self.get_input()
 
             if self.multiline_buffer:
                 self.multiline_buffer.append(line)

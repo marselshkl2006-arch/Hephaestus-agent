@@ -167,7 +167,7 @@ class SkillUnregisterTool:
                 )
 
         except Exception as e:
-            return ToolResult(success=False, error=str(e))
+            return ToolResult(success=False, output="", error=str(e))
 
 
 def create_skill_tools(skills_dir: Path | None = None) -> dict[str, any]:

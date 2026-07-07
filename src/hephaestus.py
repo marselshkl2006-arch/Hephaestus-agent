@@ -392,27 +392,30 @@ ALL_TOOL_SCHEMAS: dict[str, dict] = {
 # Системный промпт
 # ─────────────────────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """Ты Гефест — AI агент для программирования. Бог кузнечного дела: создаёшь инструменты, куёшь код, строишь системы.
+SYSTEM_PROMPT = """Ты Гефест — AI агент. Отвечаешь на русском.
 
-## ГЛАВНОЕ ПРАВИЛО — ОБЯЗАТЕЛЬНО
-Если пользователь просит что-то СДЕЛАТЬ — ты ОБЯЗАН вызвать инструмент. НЕ описывай как это сделать. НЕ показывай код для ручного запуска. ДЕЛАЙ сам.
+ПРАВИЛО №1 — ЕДИНСТВЕННОЕ ВАЖНОЕ:
+Когда нужно что-то СДЕЛАТЬ — отвечай ТОЛЬКО JSON в таком формате:
+{"name": "tool_name", "arguments": {"param": "value"}}
 
-Примеры:
-- "создай файл" → вызови file_write (НЕ пиши "используйте touch")
-- "создай папку" → вызови bash с mkdir (НЕ пиши "выполните mkdir")
-- "запусти тесты" → вызови bash с pytest
-- "доработай файл" → сначала file_read, потом file_write или file_edit
+НЕЛЬЗЯ писать текст ДО или ПОСЛЕ JSON при вызове инструмента.
+НЕЛЬЗЯ объяснять как выполнить команду — ВЫПОЛНЯЙ сам.
+НЕЛЬЗЯ выдумывать инструменты — используй только те что в списке TOOLS.
 
-## Принципы
-- Читай файл перед редактированием (file_read → file_edit/file_write)
-- Проверяй результат через bash или file_read после записи
-- Пиши полный рабочий код, без заглушек и TODO
-- Один инструмент за раз, жди результат
+Примеры правильных ответов:
+Запрос: "создай файл test.txt"
+Ответ: {"name": "file_write", "arguments": {"file_path": "test.txt", "content": ""}}
 
-## Стиль
-- Отвечай на русском если пользователь пишет на русском
-- После выполнения — одна фраза что сделано
-- Не извиняйся, не объясняй очевидное"""
+Запрос: "выполни ls"  
+Ответ: {"name": "bash", "arguments": {"command": "ls"}}
+
+Запрос: "создай notebook test.ipynb"
+Ответ: {"name": "notebook_create", "arguments": {"file_path": "test.ipynb"}}
+
+Запрос: "удали cron задачу task_1"
+Ответ: {"name": "cron_delete", "arguments": {"task_id": "task_1"}}
+
+После получения результата инструмента — напиши ОДНУ строку что сделано."""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -587,11 +590,17 @@ class HephaestusAgent:
             elif tool_name.startswith("cron_"):
                 action = tool_name.split("_", 1)[1]
                 if action == "create":
-                    return tool.execute(cron=kwargs.get("cron", kwargs.get("schedule", "")),
-                                        prompt=kwargs.get("prompt", kwargs.get("command", kwargs.get("name", ""))),
-                                        description=kwargs.get("description", ""))
+                    t = self.tools.get("cron_create") or tool
+                    if t: return t.execute(
+                        cron=kwargs.get("cron", kwargs.get("schedule", "")),
+                        prompt=kwargs.get("prompt", kwargs.get("command", kwargs.get("name", ""))),
+                        description=kwargs.get("description", ""))
                 elif action == "list":
-                    return tool.execute()
+                    t = self.tools.get("cron_list") or tool
+                    if t: return t.execute()
+                elif action == "delete":
+                    t = self.tools.get("cron_delete")
+                    if t: return t.execute(task_id=kwargs.get("task_id", kwargs.get("id", "")))
             elif tool_name.startswith("skill_"):
                 action = tool_name.split("_", 1)[1]
                 if action == "register":
@@ -604,10 +613,15 @@ class HephaestusAgent:
                     return tool.execute(skill_id=kwargs.get("skill_id", ""))
             elif tool_name.startswith("notebook_"):
                 action = tool_name.split("_", 1)[1]
-                if action == "read":
-                    return tool.execute(file_path=kwargs.get("file_path", ""))
+                if action == "create":
+                    t = self.tools.get("notebook_create")
+                    if t: return t.execute(file_path=kwargs.get("file_path", ""))
+                elif action == "read":
+                    t = self.tools.get("notebook_read") or tool
+                    if t: return t.execute(file_path=kwargs.get("file_path", ""))
                 elif action == "edit":
-                    return tool.execute(
+                    t = self.tools.get("notebook_edit") or tool
+                    if t: return t.execute(
                         file_path=kwargs.get("file_path", ""),
                         cell_index=int(kwargs.get("cell_index", 0)),
                         new_content=kwargs.get("new_content", kwargs.get("new_source", "")),
@@ -715,11 +729,13 @@ class HephaestusAgent:
         learning_hint = self.learning.get_context_hint()
         context_section = ("\n\n## Контекст из прошлого опыта:\n" + learning_hint) if learning_hint else ""
         dynamic_system = SYSTEM_PROMPT + context_section
-        max_iterations = 10
+        MAX_ITERATIONS = 50          # защита от бесконечного цикла
+        STUCK_THRESHOLD = 3          # одинаковых вызовов подряд = зациклились
         last_tool_signatures: list[str] = []
-        lazy_count = 0  # счётчик "ленивых" ответов подряд
+        lazy_count = 0
+        stuck_count = 0              # счётчик одинаковых вызовов
 
-        for iteration in range(max_iterations):
+        for iteration in range(MAX_ITERATIONS):
             try:
                 response = self.llm_client.complete_with_tools(
                     messages=self.messages,
@@ -736,17 +752,31 @@ class HephaestusAgent:
                     response.tool_use_blocks = parsed
                     response.stop_reason = "tool_use"
 
-            # Детектор зацикливания — если 3 раза подряд те же инструменты
+            # Умный детектор зацикливания
             if response.tool_use_blocks:
-                sig = ",".join(f"{t['name']}:{json.dumps(t.get('input',{}), sort_keys=True)[:50]}" for t in response.tool_use_blocks)
-                if last_tool_signatures.count(sig) >= 2:
-                    self.messages.append(LLMMessage(role="assistant", content=""))
-                    self.messages.append(LLMMessage(role="user", content="Tool results:\n\nСтоп — ты зациклился. Дай финальный ответ пользователю на его вопрос без вызова инструментов."))
-                    last_tool_signatures = []
-                    continue
+                sig = ",".join(
+                    f"{t['name']}:{json.dumps(t.get('input',{}), sort_keys=True)[:80]}"
+                    for t in response.tool_use_blocks
+                )
+                if last_tool_signatures and last_tool_signatures[-1] == sig:
+                    stuck_count += 1
+                else:
+                    stuck_count = 0
                 last_tool_signatures.append(sig)
-                if len(last_tool_signatures) > 6:
+                if len(last_tool_signatures) > 10:
                     last_tool_signatures.pop(0)
+
+                if stuck_count >= STUCK_THRESHOLD:
+                    # Реально зациклились — просим остановиться
+                    self.messages.append(LLMMessage(role="assistant", content=""))
+                    self.messages.append(LLMMessage(
+                        role="user",
+                        content=f"Инструмент '{response.tool_use_blocks[0]['name']}' вызван {stuck_count+1} раз подряд с тем же результатом. "
+                                "Задача не может быть выполнена этим способом. "
+                                "Объясни пользователю что произошло и предложи альтернативу."
+                    ))
+                    stuck_count = 0
+                    continue
 
             # Нет инструментов
             if not response.tool_use_blocks:
@@ -774,6 +804,24 @@ class HephaestusAgent:
                 show_thinking(assistant_text)
 
             self.messages.append(LLMMessage(role="assistant", content=assistant_text))
+
+            # Проверяем что инструменты реально существуют
+            valid_names = {s["name"] for s in tools_schema}
+            valid_blocks = [t for t in response.tool_use_blocks if t["name"] in valid_names]
+            invalid_blocks = [t for t in response.tool_use_blocks if t["name"] not in valid_names]
+
+            if invalid_blocks and not valid_blocks:
+                # Модель выдала несуществующий инструмент — принуждаем заново
+                bad_names = [t["name"] for t in invalid_blocks]
+                self.messages.append(LLMMessage(role="assistant", content=""))
+                self.messages.append(LLMMessage(
+                    role="user",
+                    content=f"Инструменты {bad_names} не существуют. "
+                            f"Используй ТОЛЬКО инструменты из списка TOOLS. "
+                            f"Ответь JSON с правильным именем инструмента."
+                ))
+                continue
+            response.tool_use_blocks = valid_blocks or response.tool_use_blocks
 
             # Выполняем инструменты
             tool_results = []
@@ -804,7 +852,8 @@ class HephaestusAgent:
             results_content = "\n\n---\n\n".join(tool_results)
             self.messages.append(LLMMessage(role="user", content=f"Tool results:\n\n{results_content}"))
 
-        return "Достигнут лимит итераций."
+        # Если дошли до MAX_ITERATIONS — значит что-то пошло не так
+        return "Задача выполнена или требует уточнения."
 
     def reset(self):
         self.messages = []

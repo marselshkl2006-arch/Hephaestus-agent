@@ -539,8 +539,9 @@ class OllamaClient(LLMClient):
                 model=response.model,
                 tool_use_blocks=tool_use_blocks if tool_use_blocks else None,
             )
-        except Exception:
-            # Если нативный tool calling не поддерживается моделью — JSON fallback
+        except Exception as _e:
+            # Нативный tool calling не сработал — используем JSON fallback
+            # Это нормально для моделей которые не поддерживают tools параметр
             return self._fallback_tool_calling(messages, tools, system)
 
     def stream_complete(self, messages: list[LLMMessage], system: str | None = None) -> Iterator[str]:

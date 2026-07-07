@@ -53,7 +53,7 @@ class CronCreateTool:
             )
 
         except Exception as e:
-            return ToolResult(success=False, error=str(e))
+            return ToolResult(success=False, output="", error=str(e))
 
 
 @dataclass
@@ -98,7 +98,7 @@ class CronListTool:
             return ToolResult(success=True, output="\n".join(lines))
 
         except Exception as e:
-            return ToolResult(success=False, error=str(e))
+            return ToolResult(success=False, output="", error=str(e))
 
 
 @dataclass
@@ -136,7 +136,7 @@ class CronDeleteTool:
                 )
 
         except Exception as e:
-            return ToolResult(success=False, error=str(e))
+            return ToolResult(success=False, output="", error=str(e))
 
 
 def create_cron_tools(storage_path: Path | None = None) -> dict[str, any]:
