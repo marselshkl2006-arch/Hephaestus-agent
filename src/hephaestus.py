@@ -77,6 +77,10 @@ def _load_database_tools():
     from .database_tools import DatabaseQueryTool
     return {"database": DatabaseQueryTool()}
 
+def _load_web_surfer():
+    from .web_surfer import create_web_surfer
+    return create_web_surfer()
+
 def _load_ocr_tools():
     from .ocr_tool import OCRTool
     return {"ocr": OCRTool()}
@@ -156,6 +160,22 @@ ALL_TOOL_SCHEMAS: dict[str, dict] = {
     "git": {
         "description": "Выполнить git команду. Примеры: 'status', 'diff', 'log', 'add .', 'commit -m \"fix\"'",
         "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}
+    },
+    "web_search_deep": {
+        "description": "Глубокий поиск — ищет и читает несколько страниц, собирает информацию",
+        "input_schema": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "Поисковый запрос"},
+            "depth": {"type": "integer", "description": "Сколько страниц прочитать (1-5, по умолчанию 3)"},
+            "save_to": {"type": "string", "description": "Путь для сохранения результата"}
+        }, "required": ["query"]}
+    },
+    "web_page": {
+        "description": "Загрузить страницу и извлечь текст, ссылки или всё сразу",
+        "input_schema": {"type": "object", "properties": {
+            "url": {"type": "string", "description": "URL страницы"},
+            "extract": {"type": "string", "description": "Что извлечь: text, links, both (по умолчанию text)"},
+            "save_to": {"type": "string", "description": "Путь для сохранения"}
+        }, "required": ["url"]}
     },
     "web_fetch": {
         "description": "Загрузить URL и вернуть содержимое",
@@ -503,6 +523,7 @@ class HephaestusAgent:
         self.workspace_root = Path(workspace_root or Path.cwd()).resolve()
         self.auto_approve = auto_approve
         self.debug = False  # включается через --debug
+        self.auto_commit = False  # git автокоммиты
         self.messages: list[LLMMessage] = []
 
         self._init_tools()
@@ -524,25 +545,88 @@ class HephaestusAgent:
         self.tools.update(_try_import(_load_notebook_tools))
         self.tools.update(_try_import(_load_docker_tools))
         self.tools.update(_try_import(_load_database_tools))
+        self.tools.update(_try_import(_load_web_surfer))
         self.tools.update(_try_import(_load_ocr_tools))
         self.tools.update(_try_import(_load_diagram_tools))
         self.tools.update(_try_import(_load_doc_tools))
         self.tools.update(_try_import(_load_github_tools))
 
-    def _get_tools_schema(self) -> list[dict]:
-        """JSON Schema только для подключённых инструментов."""
-        # Инструменты реализованные не напрямую через self.tools[name]
-        ALWAYS_INCLUDE = {'docker_list', 'doc_readme', 'doc_generate', 'github_workflow', 'notebook_edit', 'notebook_create', 'notebook_read', 'cron_delete', 'docker_stop', 'db_schema', 'doc_docstrings', 'diagram_class', 'diagram_tree', 'diagram_deps', 'diagram_mermaid', 'git', 'docker_exec', 'ocr_extract', 'ocr_status', 'ocr_languages', 'docker_logs', 'db_query', 'docker_run'}
+    def _get_tools_schema(self, query: str = "") -> list[dict]:
+        """JSON Schema — умный выбор релевантных инструментов."""
+        ALWAYS_INCLUDE = {
+            "git", "ocr_extract", "ocr_status", "ocr_languages",
+            "web_search_deep", "web_page", "notebook_edit",
+            "notebook_create", "notebook_read", "cron_delete",
+            "diagram_class", "diagram_tree", "diagram_deps", "diagram_mermaid",
+        }
+
+        # Ключевые слова → группы инструментов
+        KEYWORD_MAP = {
+            ("файл", "file", "создай", "прочитай", "удали", "измени",
+             "скопируй", "перемести", "напиши", "сохрани", "открой"):
+                {"bash", "file_read", "file_write", "file_edit", "file_delete",
+                 "file_move", "file_copy", "file_exists", "glob", "grep", "git"},
+            ("память", "запомни", "помни", "memory", "найди в памяти",
+             "забудь", "вспомни"):
+                {"memory_add", "memory_search", "memory_list", "memory_delete"},
+            ("задач", "task", "todo", "сделать", "выполнить", "список дел"):
+                {"task_create", "task_list", "task_update"},
+            ("cron", "расписани", "schedule", "запуск", "автоматическ"):
+                {"cron_create", "cron_list", "cron_delete"},
+            ("навык", "skill", "скрипт", "зарегистрир"):
+                {"skill_register", "skill_list", "skill_execute"},
+            ("notebook", "jupyter", "ipynb", "ячейк"):
+                {"notebook_create", "notebook_read", "notebook_edit"},
+            ("база", "бд", "db", "sql", "таблиц", "запрос", "select",
+             "insert", "create table"):
+                {"db_query", "db_schema"},
+            ("docker", "контейнер", "образ", "запусти контейнер"):
+                {"docker_list", "docker_run", "docker_stop",
+                 "docker_logs", "docker_exec"},
+            ("веб", "web", "сайт", "url", "http", "загрузи", "поиск",
+             "найди в интернете", "search", "google"):
+                {"web_search", "web_fetch", "web_search_deep", "web_page"},
+            ("ocr", "распознай", "изображени", "фото", "скриншот"):
+                {"ocr_extract", "ocr_status", "ocr_languages"},
+            ("диаграмм", "дерево", "граф", "класс", "структур", "mermaid"):
+                {"diagram_class", "diagram_tree", "diagram_deps", "diagram_mermaid"},
+            ("bash", "команд", "терминал", "shell", "выполни", "запусти"):
+                {"bash"},
+            ("документац", "readme", "docstring", "doc"):
+                {"doc_generate", "doc_readme", "doc_docstrings"},
+            ("github", "workflow", "ci", "action"):
+                {"github_workflow"},
+        }
+
+        # Базовые инструменты — всегда
+        BASE = {"bash", "file_read", "file_write", "file_edit",
+                "file_delete", "glob", "git"}
+
+        if query:
+            q = query.lower()
+            selected = set(BASE) | ALWAYS_INCLUDE
+            for keywords, tools in KEYWORD_MAP.items():
+                if any(kw in q for kw in keywords):
+                    selected |= tools
+            # Если запрос длинный (много задач) — берём все
+            if len(query) > 200 or query.count("\n") > 3:
+                selected = None  # все инструменты
+        else:
+            selected = None  # все инструменты
 
         schemas = []
         for name, schema in ALL_TOOL_SCHEMAS.items():
-            if name in self.tools or name in ALWAYS_INCLUDE:
+            in_tools = name in self.tools or name in ALWAYS_INCLUDE or name == "git"
+            if not in_tools:
+                continue
+            if selected is None or name in selected:
                 schemas.append({
                     "name": name,
                     "description": schema["description"],
                     "input_schema": schema["input_schema"],
                 })
         return schemas
+
 
     def execute_tool(self, tool_name: str, **kwargs) -> ToolResult:
         """Выполнить инструмент."""
@@ -609,19 +693,30 @@ class HephaestusAgent:
                 pattern = kwargs.get("pattern") or kwargs.get("path") or "**/*"
                 # Если абсолютный путь — конвертируем в относительный паттерн
                 if pattern.startswith("/"):
-                    import os
+                    import os as _os
                     try:
                         ws = str(self.workspace_root)
                         if pattern.startswith(ws):
                             pattern = pattern[len(ws):].lstrip("/")
                         else:
-                            # Ищем в абсолютном пути через bash
                             bash = self.tools.get("bash")
                             if bash:
-                                return bash.execute(f"find {pattern} 2>/dev/null | head -50 || ls {pattern} 2>/dev/null")
+                                return bash.execute(
+                                    f"find {pattern} -not -path '*/venv/*' "
+                                    f"-not -path '*/__pycache__/*' 2>/dev/null | head -50"
+                                )
                     except Exception:
                         pass
-                return tool.search(pattern)
+                # Фильтруем мусор в результатах
+                result = tool.search(pattern)
+                if result.success and result.output:
+                    lines = [
+                        l for l in result.output.split("\n")
+                        if l and "venv/" not in l and "__pycache__/" not in l
+                        and ".pyc" not in l
+                    ]
+                    result.output = "\n".join(lines)
+                return result
             elif tool_name == "grep":
                 pattern = kwargs.get("pattern") or kwargs.get("query") or ""
                 path = kwargs.get("path") or kwargs.get("directory") or "**/*"
@@ -659,15 +754,27 @@ class HephaestusAgent:
                     if not mem_id or not mem_id.startswith("mem_"):
                         search_query = (mem_id or kwargs.get("text") or
                                         kwargs.get("content") or kwargs.get("query") or "")
+                        import re as _re
                         if search_query:
+                            # Ищем по содержимому
                             search_tool = self.tools.get("memory_search")
                             if search_tool:
                                 sr = search_tool.execute(query=search_query)
                                 if sr.success and "mem_" in (sr.output or ""):
-                                    import re as _re
-                                    found = _re.search("mem_[0-9]+_[0-9]+", sr.output)
+                                    found = _re.findall("mem_[0-9]+_[0-9]+", sr.output)
                                     if found:
-                                        mem_id = found.group()
+                                        mem_id = found[0]  # берём первый найденный
+                        if not mem_id or not mem_id.startswith("mem_"):
+                            # Ничего не нашли — показываем список
+                            list_tool = self.tools.get("memory_list")
+                            if list_tool:
+                                lr = list_tool.execute(limit=20)
+                                ids = _re.findall("mem_[0-9]+_[0-9]+", lr.output or "")
+                                return ToolResult(
+                                    success=False, output="",
+                                    error=f"Укажи реальный ID записи. "
+                                          f"Доступные ID: {', '.join(ids[:5]) if ids else 'нет записей'}"
+                                )
                     return tool.execute(mem_id=mem_id)
             elif tool_name.startswith("task_"):
                 action = tool_name.split("_", 1)[1]
@@ -801,6 +908,30 @@ class HephaestusAgent:
                           kwargs.get("db_path") or "")
                     return t.get_schema(database=db, db_type=kwargs.get("db_type","sqlite"))
 
+            # === ВЕБ СЁРФИНГ ===
+            elif tool_name == "web_search_deep":
+                t = self.tools.get("web_surfer")
+                if t: return t.research(
+                    query=kwargs.get("query", ""),
+                    depth=int(kwargs.get("depth", 3)),
+                    save_to=kwargs.get("save_to", ""),
+                )
+            elif tool_name == "web_page":
+                t = self.tools.get("web_surfer")
+                if t: return t.fetch_page(
+                    url=kwargs.get("url", ""),
+                    extract=kwargs.get("extract", "text"),
+                    save_to=kwargs.get("save_to", ""),
+                )
+            elif tool_name == "web_search":
+                # Пробуем сначала web_surfer, потом старый web_tools
+                t = self.tools.get("web_surfer")
+                if t:
+                    return t.search(
+                        query=kwargs.get("query", ""),
+                        max_results=int(kwargs.get("max_results", 8)),
+                    )
+
             # === OCR ===
             elif tool_name == "ocr_extract":
                 t = self.tools.get("ocr")
@@ -878,7 +1009,7 @@ class HephaestusAgent:
         """Отправить сообщение и получить ответ."""
         self.messages.append(LLMMessage(role="user", content=user_message))
 
-        tools_schema = self._get_tools_schema()
+        tools_schema = self._get_tools_schema(query=user_message)
         learning_hint = self.learning.get_context_hint()
         context_section = ("\n\n## Контекст из прошлого опыта:\n" + learning_hint) if learning_hint else ""
         dynamic_system = SYSTEM_PROMPT + context_section
@@ -890,11 +1021,36 @@ class HephaestusAgent:
 
         for iteration in range(MAX_ITERATIONS):
             try:
-                response = self.llm_client.complete_with_tools(
-                    messages=self.messages,
-                    tools=tools_schema,
-                    system=dynamic_system,
-                )
+                # Streaming — показываем токены в реальном времени
+                import sys as _sys
+                streamed_tokens = []
+
+                def _on_token(token: str):
+                    streamed_tokens.append(token)
+                    # Печатаем только если нет tool calls ещё
+                    if len(streamed_tokens) == 1:
+                        _sys.stdout.write("\n")
+                    _sys.stdout.write(token)
+                    _sys.stdout.flush()
+
+                # Пробуем streaming если поддерживается
+                stream_fn = getattr(self.llm_client, "stream_complete_with_tools", None)
+                if stream_fn and self.llm_client.__class__.__name__ == "OllamaClient":
+                    response = stream_fn(
+                        messages=self.messages,
+                        tools=tools_schema,
+                        system=dynamic_system,
+                        on_token=_on_token,
+                    )
+                    if streamed_tokens:
+                        _sys.stdout.write("\n")
+                        _sys.stdout.flush()
+                else:
+                    response = self.llm_client.complete_with_tools(
+                        messages=self.messages,
+                        tools=tools_schema,
+                        system=dynamic_system,
+                    )
             except Exception as e:
                 return f"❌ Ошибка LLM: {e}"
 
@@ -1017,6 +1173,13 @@ class HephaestusAgent:
                 # Контекстное обучение
                 if result.success:
                     self.learning.record_success(name, params)
+                    # Автокоммит в git после изменения файлов
+                    if self.auto_commit and name in ("file_write", "file_edit", "file_delete"):
+                        fp = params.get("file_path") or params.get("path") or params.get("filename", "")
+                        if fp:
+                            bash = self.tools.get("bash")
+                            if bash:
+                                bash.execute(f"git add -A && git commit -m 'feat: {name} {fp[:50]}' 2>/dev/null || true")
                 else:
                     self.learning.record_failure(name, result.error or "", params)
 
@@ -1033,6 +1196,13 @@ class HephaestusAgent:
 
     def reset(self):
         self.messages = []
+
+    def pursue_goal(self, goal: str, save_report_to: str = "") -> str:
+        """Goal mode — планирует и выполняет цель до конца."""
+        from .goal_mode import GoalModeAgent
+        from .hephaestus_repl import show_info
+        gm = GoalModeAgent(agent=self, on_progress=lambda m: show_info(m))
+        return gm.pursue(goal, save_report_to=save_report_to)
 
     def save_session(self) -> str:
         """Сохранить текущую сессию."""
@@ -1076,6 +1246,7 @@ def main():
     parser.add_argument("--auto-approve", action="store_true")
     parser.add_argument("--temperature", type=float, default=0.1)
     parser.add_argument("--no-logo", action="store_true", help="Без анимации логотипа")
+    parser.add_argument("--auto-commit", action="store_true", help="Автокоммит в git после изменений")
     parser.add_argument("--debug", action="store_true", help="Отладочный режим — показывает детали вызовов инструментов")
     args = parser.parse_args()
 
@@ -1109,6 +1280,7 @@ def main():
         auto_approve=args.auto_approve,
     )
     agent.debug = getattr(args, "debug", False)
+    agent.auto_commit = getattr(args, "auto_commit", False)
 
     if args.query:
         # Одиночный запрос

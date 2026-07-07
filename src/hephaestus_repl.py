@@ -210,6 +210,9 @@ class HephaestusREPL:
 ## История
 - `/history` — последние команды
 
+## Цели
+- `/goal <цель>` — Goal Mode: агент планирует и выполняет сам до конца
+
 ## Сессии
 - `/sessions` — список сохранённых сессий
 - `/save` — сохранить текущую сессию
@@ -302,6 +305,12 @@ class HephaestusREPL:
                     show_success("История диалога очищена")
                 elif cmd == "/tools":
                     self._show_tools(agent)
+                elif cmd == "/goal":
+                    if not args:
+                        show_error("Укажи цель: /goal создай TODO приложение на Python")
+                    else:
+                        result = agent.pursue_goal(args)
+                        print_response(result)
                 elif cmd == "/sessions":
                     sessions = agent.session_manager.list_sessions()
                     if not sessions:

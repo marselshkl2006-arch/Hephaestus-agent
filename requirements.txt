@@ -26,3 +26,9 @@ pytest-cov>=5.0.0          # Coverage отчёты
 # На Windows может потребоваться:
 # pyreadline3>=3.4.1
 prompt_toolkit>=3.0.0       # Надёжный промпт без бага с backspace
+
+# === Telegram Bot ===
+python-telegram-bot>=20.0    # Telegram бот
+
+# === Web Surfer ===
+trafilatura>=1.6.0           # Лучший парсер текста из HTML (опционально)
