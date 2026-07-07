@@ -587,15 +587,19 @@ class HephaestusAgent:
                 fp = kwargs.get("file_path") or kwargs.get("path") or kwargs.get("filename") or ""
                 return tool.delete(fp)
             elif tool_name in ("file_move", "file_rename"):
-                src = (kwargs.get("source") or kwargs.get("src") or kwargs.get("src_path") or
+                src = (kwargs.get("source") or kwargs.get("source_path") or
+                       kwargs.get("src") or kwargs.get("src_path") or
                        kwargs.get("from") or kwargs.get("file_path") or "")
-                dst = (kwargs.get("destination") or kwargs.get("dst") or kwargs.get("dst_path") or
+                dst = (kwargs.get("destination") or kwargs.get("destination_path") or
+                       kwargs.get("dst") or kwargs.get("dst_path") or
                        kwargs.get("to") or kwargs.get("new_path") or "")
                 return tool.move(src, dst)
             elif tool_name == "file_copy":
-                src = (kwargs.get("source") or kwargs.get("src") or kwargs.get("src_path") or
+                src = (kwargs.get("source") or kwargs.get("source_path") or
+                       kwargs.get("src") or kwargs.get("src_path") or
                        kwargs.get("from") or kwargs.get("file_path") or "")
-                dst = (kwargs.get("destination") or kwargs.get("dst") or kwargs.get("dst_path") or
+                dst = (kwargs.get("destination") or kwargs.get("destination_path") or
+                       kwargs.get("dst") or kwargs.get("dst_path") or
                        kwargs.get("to") or kwargs.get("new_path") or "")
                 return tool.copy(src, dst)
             elif tool_name == "file_exists":
@@ -916,14 +920,25 @@ class HephaestusAgent:
                     last_tool_signatures.pop(0)
 
                 if stuck_count >= STUCK_THRESHOLD:
-                    # Реально зациклились — просим остановиться
-                    self.messages.append(LLMMessage(role="assistant", content=""))
-                    self.messages.append(LLMMessage(
-                        role="user",
-                        content=f"Инструмент '{response.tool_use_blocks[0]['name']}' вызван {stuck_count+1} раз подряд с тем же результатом. "
-                                "Задача не может быть выполнена этим способом. "
-                                "Объясни пользователю что произошло и предложи альтернативу."
-                    ))
+                    tool_name_stuck = response.tool_use_blocks[0]["name"]
+                    # Readonly инструменты (diagram_tree, file_read и т.д.) — просто останавливаем
+                    readonly = {"diagram_tree", "diagram_class", "diagram_deps", "diagram_mermaid",
+                                "file_read", "file_exists", "glob", "grep", "task_list",
+                                "memory_list", "memory_search", "cron_list", "skill_list"}
+                    if tool_name_stuck in readonly:
+                        # Не зацикливание — просто повтор read-only. Возвращаем последний результат.
+                        self.messages.append(LLMMessage(role="assistant", content=""))
+                        self.messages.append(LLMMessage(
+                            role="user",
+                            content=f"Результат уже получен. Переходи к следующему шагу."
+                        ))
+                    else:
+                        self.messages.append(LLMMessage(role="assistant", content=""))
+                        self.messages.append(LLMMessage(
+                            role="user",
+                            content=f"Инструмент '{tool_name_stuck}' вызван {stuck_count+1} раз с тем же результатом. "
+                                    "Объясни пользователю что произошло и переходи к следующему шагу."
+                        ))
                     stuck_count = 0
                     continue
 
@@ -987,6 +1002,18 @@ class HephaestusAgent:
                 show_tool_result(result.output or result.error or "", result.success)
                 if self.debug:
                     show_debug(name, params, result, _elapsed)
+
+                # Диаграммы — добавляем полный вывод в контекст явно
+                DIAGRAM_TOOLS = {"diagram_class", "diagram_tree", "diagram_deps", "diagram_mermaid"}
+                if name in DIAGRAM_TOOLS and result.success and result.output:
+                    from .hephaestus_repl import console as _console
+                    from rich.panel import Panel as _Panel
+                    _console.print(_Panel(
+                        result.output,
+                        title=f"[bold red]{name}[/bold red]",
+                        border_style="red",
+                        padding=(0, 1),
+                    ))
                 # Контекстное обучение
                 if result.success:
                     self.learning.record_success(name, params)

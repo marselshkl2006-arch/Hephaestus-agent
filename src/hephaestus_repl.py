@@ -122,11 +122,21 @@ def show_tool_call(name: str, params: str) -> None:
     console.print(f"\n[bold red]⚒️  [/bold red][yellow]{name}[/yellow][dim]({params})[/dim]")
 
 def show_tool_result(output: str, success: bool = True) -> None:
+    # Диаграммы и многострочный вывод показываем полностью
+    DIAGRAM_MARKERS = ["📐", "📂", "🔗", "📊", "┌─", "├──", "└──", "│ "]
+    is_diagram = any(m in (output or "") for m in DIAGRAM_MARKERS)
+    is_multiline = (output or "").count("\n") > 3
+
     if success:
-        preview = output[:200].replace("\n", " ") if output else "OK"
-        console.print(f"   [green]✓[/green] [dim]{preview}[/dim]")
+        if is_diagram or is_multiline:
+            # Полный вывод для диаграмм и длинных результатов
+            console.print(f"   [green]✓[/green]")
+            console.print(output or "OK")
+        else:
+            preview = output[:300].replace("\n", " ") if output else "OK"
+            console.print(f"   [green]✓[/green] [dim]{preview}[/dim]")
     else:
-        console.print(f"   [red]✗[/red] [dim]{output[:200]}[/dim]")
+        console.print(f"   [red]✗[/red] [dim]{(output or '')[:300]}[/dim]")
 
 def show_thinking(text: str = "") -> None:
     if text:
