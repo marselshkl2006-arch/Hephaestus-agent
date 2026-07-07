@@ -156,10 +156,7 @@ class SkillUnregisterTool:
             success = self.skill_system.unregister(skill_id)
 
             if success:
-                return ToolResult(
-                    success=True,
-                    output=f"✅ Навык {skill_id} удален",
-                )
+                return ToolResult(success=True, output=f"✅ Навык {skill_id} удален")
             else:
                 return ToolResult(
                     success=False,

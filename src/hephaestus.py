@@ -82,8 +82,8 @@ def _load_ocr_tools():
     return {"ocr": OCRTool()}
 
 def _load_diagram_tools():
-    from .diagram_generator import DiagramGenerator
-    return {"diagram": DiagramGenerator()}
+    from .rich_diagrams import create_diagram_tools
+    return create_diagram_tools()
 
 def _load_doc_tools():
     from .doc_generator import DocGenerator
@@ -342,18 +342,33 @@ ALL_TOOL_SCHEMAS: dict[str, dict] = {
 
     # === ДИАГРАММЫ ===
     "diagram_class": {
-        "description": "Создать диаграмму классов для Python файла в формате Mermaid",
+        "description": "Диаграмма классов Python файла прямо в терминале (Rich ASCII)",
         "input_schema": {"type": "object", "properties": {
             "file_path": {"type": "string", "description": "Путь к Python файлу"},
-            "format": {"type": "string", "description": "Формат: mermaid или plantuml"}
+            "save_to": {"type": "string", "description": "Путь для сохранения результата (опционально)"}
         }, "required": ["file_path"]}
     },
-    "diagram_flowchart": {
-        "description": "Создать блок-схему для Python функции",
+    "diagram_tree": {
+        "description": "Дерево файлов и папок в терминале",
         "input_schema": {"type": "object", "properties": {
-            "file_path": {"type": "string", "description": "Путь к файлу"},
-            "function_name": {"type": "string", "description": "Имя функции"}
+            "directory": {"type": "string", "description": "Папка (по умолчанию текущая)"},
+            "max_depth": {"type": "integer", "description": "Глубина вложенности (по умолчанию 3)"},
+            "save_to": {"type": "string", "description": "Путь для сохранения"}
+        }, "required": []}
+    },
+    "diagram_deps": {
+        "description": "Граф импортов и зависимостей Python файла",
+        "input_schema": {"type": "object", "properties": {
+            "file_path": {"type": "string", "description": "Путь к Python файлу"},
+            "save_to": {"type": "string", "description": "Путь для сохранения"}
         }, "required": ["file_path"]}
+    },
+    "diagram_mermaid": {
+        "description": "Конвертировать Mermaid код в ASCII диаграмму для терминала",
+        "input_schema": {"type": "object", "properties": {
+            "mermaid_code": {"type": "string", "description": "Mermaid код диаграммы"},
+            "save_to": {"type": "string", "description": "Путь для сохранения"}
+        }, "required": ["mermaid_code"]}
     },
 
     # === ДОКУМЕНТАЦИЯ ===
@@ -517,7 +532,7 @@ class HephaestusAgent:
     def _get_tools_schema(self) -> list[dict]:
         """JSON Schema только для подключённых инструментов."""
         # Инструменты реализованные не напрямую через self.tools[name]
-        ALWAYS_INCLUDE = {'docker_list', 'doc_readme', 'doc_generate', 'github_workflow', 'notebook_edit', 'notebook_create', 'notebook_read', 'cron_delete', 'docker_stop', 'db_schema', 'doc_docstrings', 'diagram_class', 'diagram_flowchart', 'git', 'docker_exec', 'ocr_extract', 'ocr_status', 'ocr_languages', 'docker_logs', 'db_query', 'docker_run'}
+        ALWAYS_INCLUDE = {'docker_list', 'doc_readme', 'doc_generate', 'github_workflow', 'notebook_edit', 'notebook_create', 'notebook_read', 'cron_delete', 'docker_stop', 'db_schema', 'doc_docstrings', 'diagram_class', 'diagram_tree', 'diagram_deps', 'diagram_mermaid', 'git', 'docker_exec', 'ocr_extract', 'ocr_status', 'ocr_languages', 'docker_logs', 'db_query', 'docker_run'}
 
         schemas = []
         for name, schema in ALL_TOOL_SCHEMAS.items():
@@ -537,23 +552,60 @@ class HephaestusAgent:
             if tool_name == "bash":
                 return tool.execute(kwargs.get("command", ""))
             elif tool_name == "file_read":
-                return tool.read(kwargs.get("file_path", ""))
+                fp = kwargs.get("file_path") or kwargs.get("path") or kwargs.get("filename") or ""
+                return tool.read(fp)
             elif tool_name == "file_write":
-                return tool.write(kwargs.get("file_path", ""), kwargs.get("content", ""))
+                fp = kwargs.get("file_path") or kwargs.get("path") or kwargs.get("filename") or ""
+                content = kwargs.get("content") or kwargs.get("text") or kwargs.get("data") or ""
+                if fp:
+                    from pathlib import Path as _P
+                    _P(fp).parent.mkdir(parents=True, exist_ok=True)
+                return tool.write(fp, content)
             elif tool_name == "file_edit":
-                return tool.edit(kwargs.get("file_path", ""), kwargs.get("old_text", ""), kwargs.get("new_text", ""))
+                fp = kwargs.get("file_path") or kwargs.get("path") or kwargs.get("filename") or ""
+                return tool.edit(fp,
+                    kwargs.get("old_text") or kwargs.get("old") or kwargs.get("search") or "",
+                    kwargs.get("new_text") or kwargs.get("new") or kwargs.get("replace") or "")
             elif tool_name == "file_delete":
-                return tool.delete(kwargs.get("file_path", ""))
+                fp = kwargs.get("file_path") or kwargs.get("path") or kwargs.get("filename") or ""
+                return tool.delete(fp)
             elif tool_name == "file_move":
-                return tool.move(kwargs.get("source", ""), kwargs.get("destination", ""))
+                src = kwargs.get("source") or kwargs.get("src") or kwargs.get("src_path") or kwargs.get("from") or ""
+                dst = kwargs.get("destination") or kwargs.get("dst") or kwargs.get("dst_path") or kwargs.get("to") or ""
+                return tool.move(src, dst)
             elif tool_name == "file_copy":
-                return tool.copy(kwargs.get("source", ""), kwargs.get("destination", ""))
+                src = kwargs.get("source") or kwargs.get("src") or kwargs.get("src_path") or kwargs.get("from") or ""
+                dst = kwargs.get("destination") or kwargs.get("dst") or kwargs.get("dst_path") or kwargs.get("to") or ""
+                return tool.copy(src, dst)
             elif tool_name == "file_exists":
-                return tool.exists(kwargs.get("path", ""))
+                fp = kwargs.get("path") or kwargs.get("file_path") or kwargs.get("filename") or ""
+                return tool.exists(fp)
             elif tool_name == "glob":
-                return tool.search(kwargs.get("pattern", ""))
+                pattern = kwargs.get("pattern") or kwargs.get("path") or "**/*"
+                # Если абсолютный путь — конвертируем в относительный паттерн
+                if pattern.startswith("/"):
+                    import os
+                    try:
+                        ws = str(self.workspace_root)
+                        if pattern.startswith(ws):
+                            pattern = pattern[len(ws):].lstrip("/")
+                        else:
+                            # Ищем в абсолютном пути через bash
+                            bash = self.tools.get("bash")
+                            if bash:
+                                return bash.execute(f"find {pattern} 2>/dev/null | head -50 || ls {pattern} 2>/dev/null")
+                    except Exception:
+                        pass
+                return tool.search(pattern)
             elif tool_name == "grep":
-                return tool.search(kwargs.get("pattern", ""), file_pattern=kwargs.get("path", "**/*"))
+                pattern = kwargs.get("pattern") or kwargs.get("query") or ""
+                path = kwargs.get("path") or kwargs.get("directory") or "**/*"
+                # Абсолютные пути через bash grep
+                if path.startswith("/"):
+                    bash = self.tools.get("bash")
+                    if bash:
+                        return bash.execute(f"grep -r '{pattern}' {path} 2>/dev/null | head -50")
+                return tool.search(pattern, file_pattern=path)
             elif tool_name == "git":
                 bash = self.tools.get("bash")
                 return bash.execute(f"git {kwargs.get('command', 'status')}")
@@ -567,25 +619,33 @@ class HephaestusAgent:
             elif tool_name.startswith("memory_"):
                 action = tool_name.split("_", 1)[1]
                 if action == "add":
-                    return tool.execute(content=kwargs.get("content", ""), type=kwargs.get("type", "fact"),
+                    content = (kwargs.get("content") or kwargs.get("text") or
+                               kwargs.get("message") or kwargs.get("note") or "")
+                    return tool.execute(content=content, type=kwargs.get("type", "fact"),
                                         tags=kwargs.get("tags", ""), importance=kwargs.get("importance", 5))
                 elif action == "search":
                     return tool.execute(query=kwargs.get("query", ""), type=kwargs.get("type", ""))
                 elif action == "list":
                     return tool.execute(limit=kwargs.get("limit", 50))
                 elif action == "delete":
-                    return tool.execute(mem_id=kwargs.get("mem_id", ""))
+                    mem_id = (kwargs.get("mem_id") or kwargs.get("id") or
+                              kwargs.get("memory_id") or "")
+                    return tool.execute(mem_id=mem_id)
             elif tool_name.startswith("task_"):
                 action = tool_name.split("_", 1)[1]
                 if action == "create":
-                    r = tool.create(subject=kwargs.get("subject", ""), description=kwargs.get("description", ""))
+                    subject = (kwargs.get("subject") or kwargs.get("title") or
+                               kwargs.get("name") or kwargs.get("task") or "")
+                    r = tool.create(subject=subject, description=kwargs.get("description", ""))
                     return ToolResult(success=r.success, output=str(r.data or ""), error=r.error)
                 elif action == "list":
                     r = tool.list()
                     return ToolResult(success=r.success, output=str(r.data or ""), error=r.error)
                 elif action == "update":
-                    r = tool.update(task_id=kwargs.get("task_id", ""), status=kwargs.get("status"),
-                                    subject=kwargs.get("subject"))
+                    task_id = (kwargs.get("task_id") or kwargs.get("id") or
+                               kwargs.get("task") or "")
+                    r = tool.update(task_id=task_id, status=kwargs.get("status"),
+                                    subject=kwargs.get("subject") or kwargs.get("title"))
                     return ToolResult(success=r.success, output=str(r.data or ""), error=r.error)
             elif tool_name.startswith("cron_"):
                 action = tool_name.split("_", 1)[1]
@@ -600,7 +660,10 @@ class HephaestusAgent:
                     if t: return t.execute()
                 elif action == "delete":
                     t = self.tools.get("cron_delete")
-                    if t: return t.execute(task_id=kwargs.get("task_id", kwargs.get("id", "")))
+                    if t:
+                        task_id = (kwargs.get("task_id") or kwargs.get("id") or
+                                   kwargs.get("cron_id") or kwargs.get("name") or "")
+                        return t.execute(task_id=task_id)
             elif tool_name.startswith("skill_"):
                 action = tool_name.split("_", 1)[1]
                 if action == "register":
@@ -610,12 +673,29 @@ class HephaestusAgent:
                 elif action == "list":
                     return tool.execute()
                 elif action == "execute":
-                    return tool.execute(skill_id=kwargs.get("skill_id", ""))
+                    skill_id = (kwargs.get("skill_id") or kwargs.get("id") or
+                                kwargs.get("name") or "")
+                    # Если передали имя навыка — конвертируем в skill_ID формат
+                    if skill_id and not skill_id.startswith("skill_"):
+                        skill_id_candidate = f"skill_{skill_id.lower().replace(' ', '_')}"
+                        # Проверяем что такой навык есть
+                        list_tool = self.tools.get("skill_list")
+                        if list_tool:
+                            list_res = list_tool.execute()
+                            if skill_id_candidate in (list_res.output or ""):
+                                skill_id = skill_id_candidate
+                    return tool.execute(skill_id=skill_id)
             elif tool_name.startswith("notebook_"):
                 action = tool_name.split("_", 1)[1]
                 if action == "create":
                     t = self.tools.get("notebook_create")
-                    if t: return t.execute(file_path=kwargs.get("file_path", ""))
+                    if t:
+                        fp = (kwargs.get("file_path") or kwargs.get("path") or
+                              kwargs.get("filename") or "")
+                        if fp:
+                            from pathlib import Path as _P
+                            _P(fp).parent.mkdir(parents=True, exist_ok=True)
+                        return t.execute(file_path=fp)
                 elif action == "read":
                     t = self.tools.get("notebook_read") or tool
                     if t: return t.execute(file_path=kwargs.get("file_path", ""))
@@ -679,15 +759,31 @@ class HephaestusAgent:
                 t = self.tools.get("ocr")
                 if t: return t.get_languages()
 
-            # === ДИАГРАММЫ ===
+            # === ДИАГРАММЫ (Rich — терминальные) ===
             elif tool_name == "diagram_class":
                 t = self.tools.get("diagram")
-                if t: return t.generate_class_diagram(file_path=kwargs.get("file_path",""),
-                    format=kwargs.get("format","mermaid"))
-            elif tool_name == "diagram_flowchart":
+                if t: return t.class_diagram(
+                    file_path=kwargs.get("file_path",""),
+                    save_to=kwargs.get("save_to",""))
+            elif tool_name == "diagram_tree":
                 t = self.tools.get("diagram")
-                if t: return t.generate_flowchart(file_path=kwargs.get("file_path",""),
-                    function_name=kwargs.get("function_name",""))
+                if t: return t.file_tree(
+                    directory=kwargs.get("directory", "."),
+                    max_depth=int(kwargs.get("max_depth", 3)),
+                    save_to=kwargs.get("save_to",""))
+            elif tool_name == "diagram_deps":
+                t = self.tools.get("diagram")
+                if t: return t.dependency_graph(
+                    file_path=kwargs.get("file_path",""),
+                    save_to=kwargs.get("save_to",""))
+            elif tool_name == "diagram_mermaid":
+                t = self.tools.get("diagram")
+                if t: return t.mermaid_to_ascii(
+                    mermaid_code=kwargs.get("mermaid_code",""),
+                    save_to=kwargs.get("save_to",""))
+            elif tool_name == "diagram_flowchart":  # алиас для старого
+                t = self.tools.get("diagram")
+                if t: return t.class_diagram(file_path=kwargs.get("file_path",""))
 
             # === ДОКУМЕНТАЦИЯ ===
             elif tool_name == "doc_generate":

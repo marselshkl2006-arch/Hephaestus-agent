@@ -125,15 +125,9 @@ class CronDeleteTool:
             success = self.scheduler.delete(task_id)
 
             if success:
-                return ToolResult(
-                    success=True,
-                    output=f"✅ Задача {task_id} удалена",
-                )
+                return ToolResult(success=True, output=f"✅ Задача {task_id} удалена")
             else:
-                return ToolResult(
-                    success=False,
-                    error=f"Задача {task_id} не найдена",
-                )
+                return ToolResult(success=False, output="", error=f"Задача {task_id} не найдена")
 
         except Exception as e:
             return ToolResult(success=False, output="", error=str(e))
