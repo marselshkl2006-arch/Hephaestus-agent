@@ -48,52 +48,69 @@ class WebSurferTool:
             return ToolResult(success=False, output="", error=str(e))
 
     def _search_ddg(self, query: str, max_results: int) -> ToolResult:
-        """DuckDuckGo HTML поиск."""
+        """DuckDuckGo поиск — пробует несколько методов."""
         import requests
-        from bs4 import BeautifulSoup
 
         session = self._get_session()
-        encoded = urllib.parse.quote(query)
-        url = f"https://html.duckduckgo.com/html/?q={encoded}"
-
-        resp = session.get(url, timeout=15)
-        resp.raise_for_status()
-
-        soup = BeautifulSoup(resp.text, "html.parser")
         results = []
 
-        for r in soup.select(".result__body")[:max_results]:
-            title_el = r.select_one(".result__title a")
-            snippet_el = r.select_one(".result__snippet")
+        # Метод 1: DDG HTML search (самый надёжный)
+        try:
+            from bs4 import BeautifulSoup
+            encoded = urllib.parse.quote(query)
+            url = f"https://html.duckduckgo.com/html/?q={encoded}"
+            resp = session.get(url, timeout=12)
+            soup = BeautifulSoup(resp.text, "html.parser")
 
-            if not title_el:
-                continue
+            for r in soup.select(".result__body")[:max_results]:
+                title_el = r.select_one(".result__title a")
+                snippet_el = r.select_one(".result__snippet")
+                if not title_el:
+                    continue
+                title = title_el.get_text(strip=True)
+                href = title_el.get("href", "")
+                if "uddg=" in href:
+                    try:
+                        href = urllib.parse.unquote(href.split("uddg=")[1].split("&")[0])
+                    except Exception:
+                        pass
+                snippet = snippet_el.get_text(strip=True) if snippet_el else ""
+                if href and title and href.startswith("http"):
+                    results.append({"title": title, "url": href, "snippet": snippet})
+        except Exception:
+            pass
 
-            title = title_el.get_text(strip=True)
-            href = title_el.get("href", "")
-
-            # Убираем DuckDuckGo редирект
-            if "uddg=" in href:
-                try:
-                    href = urllib.parse.unquote(href.split("uddg=")[1].split("&")[0])
-                except Exception:
-                    pass
-
-            snippet = snippet_el.get_text(strip=True) if snippet_el else ""
-            if href and title:
-                results.append({"title": title, "url": href, "snippet": snippet})
+        # Метод 2: DDG Lite если основной не дал результатов
+        if not results:
+            try:
+                from bs4 import BeautifulSoup
+                encoded = urllib.parse.quote(query)
+                url = f"https://lite.duckduckgo.com/lite/?q={encoded}"
+                resp = session.get(url, timeout=12)
+                soup = BeautifulSoup(resp.text, "html.parser")
+                for row in soup.select("tr")[:max_results * 3]:
+                    link = row.select_one("a.result-link")
+                    snip = row.select_one(".result-snippet")
+                    if link and link.get("href", "").startswith("http"):
+                        results.append({
+                            "title": link.get_text(strip=True),
+                            "url": link["href"],
+                            "snippet": snip.get_text(strip=True) if snip else ""
+                        })
+            except Exception:
+                pass
 
         if not results:
-            return ToolResult(success=False, output="", error="Результаты не найдены")
+            # Fallback на Bing
+            return self._search_bing(query, max_results)
 
         lines = [f"🔍 Результаты поиска: «{query}»\n"]
-        for i, r in enumerate(results, 1):
+        for i, r in enumerate(results[:max_results], 1):
             lines.append(f"{i}. **{r['title']}**")
             lines.append(f"   🔗 {r['url']}")
             if r["snippet"]:
                 lines.append(f"   {r['snippet']}")
             lines.append("")
-
         return ToolResult(success=True, output="\n".join(lines))
 
     def _search_bing(self, query: str, max_results: int) -> ToolResult:

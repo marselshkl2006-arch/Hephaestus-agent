@@ -212,6 +212,8 @@ class HephaestusREPL:
 
 ## Цели
 - `/goal <цель>` — Goal Mode: агент планирует и выполняет сам до конца
+- `/skills` — навыки усвоенные из прошлых целей
+- `/repomap` — карта репозитория (классы, функции)
 
 ## Сессии
 - `/sessions` — список сохранённых сессий
@@ -305,6 +307,17 @@ class HephaestusREPL:
                     show_success("История диалога очищена")
                 elif cmd == "/tools":
                     self._show_tools(agent)
+                elif cmd == "/skills":
+                    if hasattr(agent, "skill_learner") and agent.skill_learner:
+                        result = agent.skill_learner.list_skills()
+                        console.print(result.output)
+                    else:
+                        show_info("SkillLearner не активен")
+                elif cmd == "/repomap":
+                    t = agent.tools.get("repomap")
+                    if t:
+                        r = t.scan()
+                        console.print(r.output)
                 elif cmd == "/goal":
                     if not args:
                         show_error("Укажи цель: /goal создай TODO приложение на Python")

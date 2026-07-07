@@ -77,6 +77,10 @@ def _load_database_tools():
     from .database_tools import DatabaseQueryTool
     return {"database": DatabaseQueryTool()}
 
+def _load_repomap(workspace):
+    from .repomap import RepomapTool
+    return {"repomap": RepomapTool(workspace)}
+
 def _load_web_surfer():
     from .web_surfer import create_web_surfer
     return create_web_surfer()
@@ -361,6 +365,23 @@ ALL_TOOL_SCHEMAS: dict[str, dict] = {
     },
 
     # === ДИАГРАММЫ ===
+    "repomap": {
+        "description": "Карта репозитория — все классы и функции проекта (как в Aider)",
+        "input_schema": {"type": "object", "properties": {
+            "max_files": {"type": "integer", "description": "Максимум файлов (по умолчанию 50)"},
+            "save_to": {"type": "string", "description": "Путь для сохранения карты"}
+        }, "required": []}
+    },
+    "repomap_file": {
+        "description": "Краткое содержание одного файла — классы и функции",
+        "input_schema": {"type": "object", "properties": {
+            "file_path": {"type": "string", "description": "Путь к файлу"}
+        }, "required": ["file_path"]}
+    },
+    "skills_learned": {
+        "description": "Список навыков которым научился Гефест из прошлых целей",
+        "input_schema": {"type": "object", "properties": {}, "required": []}
+    },
     "diagram_class": {
         "description": "Диаграмма классов Python файла прямо в терминале (Rich ASCII)",
         "input_schema": {"type": "object", "properties": {
@@ -528,6 +549,11 @@ class HephaestusAgent:
 
         self._init_tools()
         self.session_manager = SessionManager()
+        try:
+            from .skill_learner import SkillLearner
+            self.skill_learner = SkillLearner()
+        except Exception:
+            self.skill_learner = None
         self.learning = ContextLearning()
         self.session_id: str | None = None
 
@@ -545,6 +571,7 @@ class HephaestusAgent:
         self.tools.update(_try_import(_load_notebook_tools))
         self.tools.update(_try_import(_load_docker_tools))
         self.tools.update(_try_import(_load_database_tools))
+        self.tools.update(_try_import(lambda: _load_repomap(self.workspace_root)))
         self.tools.update(_try_import(_load_web_surfer))
         self.tools.update(_try_import(_load_ocr_tools))
         self.tools.update(_try_import(_load_diagram_tools))
@@ -602,17 +629,17 @@ class HephaestusAgent:
         BASE = {"bash", "file_read", "file_write", "file_edit",
                 "file_delete", "glob", "git"}
 
-        if query:
+        if query and len(query.strip()) > 3:
             q = query.lower()
             selected = set(BASE) | ALWAYS_INCLUDE
             for keywords, tools in KEYWORD_MAP.items():
                 if any(kw in q for kw in keywords):
                     selected |= tools
-            # Если запрос длинный (много задач) — берём все
-            if len(query) > 200 or query.count("\n") > 3:
-                selected = None  # все инструменты
+            # Длинный запрос или много задач — берём все
+            if len(query) > 150 or query.count("\n") > 2:
+                selected = None
         else:
-            selected = None  # все инструменты
+            selected = None  # пустой query = все инструменты (баннер/stats)
 
         schemas = []
         for name, schema in ALL_TOOL_SCHEMAS.items():
@@ -947,6 +974,23 @@ class HephaestusAgent:
                 t = self.tools.get("ocr")
                 if t: return t.get_languages()
 
+            # === REPOMAP ===
+            elif tool_name == "repomap":
+                t = self.tools.get("repomap")
+                if t: return t.scan(
+                    max_files=int(kwargs.get("max_files", 50)),
+                    save_to=kwargs.get("save_to", ""),
+                )
+            elif tool_name == "repomap_file":
+                t = self.tools.get("repomap")
+                fp = kwargs.get("file_path") or kwargs.get("path") or ""
+                if t: return t.file_summary(fp)
+            elif tool_name == "skills_learned":
+                if self.skill_learner:
+                    return self.skill_learner.list_skills()
+                from .real_tools import ToolResult
+                return ToolResult(success=True, output="SkillLearner не инициализирован")
+
             # === ДИАГРАММЫ (Rich — терминальные) ===
             elif tool_name == "diagram_class":
                 t = self.tools.get("diagram")
@@ -1173,9 +1217,17 @@ class HephaestusAgent:
                 # Контекстное обучение
                 if result.success:
                     self.learning.record_success(name, params)
+                    # Test Loop — проверяем синтаксис Python файлов
+                    fp = params.get("file_path") or params.get("path") or params.get("filename", "")
+                    if fp and fp.endswith(".py") and name in ("file_write", "file_edit"):
+                        bash = self.tools.get("bash")
+                        if bash:
+                            check = bash.execute(f"python3 -c \"import py_compile; py_compile.compile('{fp}', doraise=True)\" 2>&1")
+                            if not check.success or check.output.strip():
+                                show_warning(f"⚠️ Синтаксическая ошибка в {fp}: {check.output[:100]}")
+
                     # Автокоммит в git после изменения файлов
                     if self.auto_commit and name in ("file_write", "file_edit", "file_delete"):
-                        fp = params.get("file_path") or params.get("path") or params.get("filename", "")
                         if fp:
                             bash = self.tools.get("bash")
                             if bash:
@@ -1201,8 +1253,30 @@ class HephaestusAgent:
         """Goal mode — планирует и выполняет цель до конца."""
         from .goal_mode import GoalModeAgent
         from .hephaestus_repl import show_info
+
+        # Показываем похожие learned skills перед выполнением
+        if self.skill_learner:
+            similar = self.skill_learner.find_similar(goal)
+            if similar:
+                show_info(f"🧠 Нашёл похожие навыки: {', '.join(s['id'] for s in similar)}")
+
         gm = GoalModeAgent(agent=self, on_progress=lambda m: show_info(m))
-        return gm.pursue(goal, save_report_to=save_report_to)
+        result = gm.pursue(goal, save_report_to=save_report_to)
+
+        # Обучаемся из результата
+        if self.skill_learner and gm.current_goal:
+            goal_obj = gm.current_goal
+            done = sum(1 for s in goal_obj.steps if s.status == "done")
+            total = len(goal_obj.steps)
+            if total > 0:
+                rate = done / total
+                steps_data = [{"step": s.step_num, "tool": s.tool,
+                               "params": s.params} for s in goal_obj.steps]
+                sid = self.skill_learner.learn_from_goal(goal, steps_data, rate)
+                if sid.startswith("learned_"):
+                    show_info(f"🧠 Навык сохранён: {sid}")
+
+        return result
 
     def save_session(self) -> str:
         """Сохранить текущую сессию."""
