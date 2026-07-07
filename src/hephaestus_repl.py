@@ -39,16 +39,15 @@ class HephaestusPrompt:
 
     def get_input(self) -> str:
         try:
-            # Используем prompt_toolkit если доступен — он не теряет промпт при backspace
             try:
                 from prompt_toolkit import prompt as pt_prompt
                 from prompt_toolkit.styles import Style
-                style = Style.from_dict({"prompt": "bold ansired"})
-                line = pt_prompt("⚡ гефест> : ", style=style)
-            except ImportError:
-                # Fallback: явно печатаем промпт через print чтобы он не исчезал
+                prompt_str = "⚡ гефест> "
+                style = Style.from_dict({"": "bold ansired"})
+                line = pt_prompt(prompt_str, style=style)
+            except Exception:
                 import sys
-                sys.stdout.write("\033[1;31m⚡ гефест\033[0m\033[1;33m> \033[0m: ")
+                sys.stdout.write("\033[1;31m⚡ гефест\033[0m\033[1;33m>\033[0m ")
                 sys.stdout.flush()
                 line = input()
 
@@ -184,6 +183,14 @@ class HephaestusREPL:
 ## История
 - `/history` — последние команды
 
+## Сессии
+- `/sessions` — список сохранённых сессий
+- `/save` — сохранить текущую сессию
+- `/load <id>` — загрузить сессию по ID
+
+## Обучение
+- `/learn` — статистика контекстного обучения
+
 ## Советы
 - Многострочный ввод: закончи строку на `\\`
 - Ctrl+C — прервать текущий запрос
@@ -230,7 +237,11 @@ class HephaestusREPL:
             try:
                 line = self.prompt.get_input()
             except EOFError:
-                show_success("\nДо свидания!")
+                if agent.messages:
+                    sid = agent.save_session()
+                    console.print(f"\n[bold yellow]⚡ До свидания![/bold yellow] [dim]Сессия: {sid}[/dim]\n")
+                else:
+                    show_success("\nДо свидания! ⚡")
                 break
             except KeyboardInterrupt:
                 show_info("\nПрервано")
@@ -247,7 +258,13 @@ class HephaestusREPL:
                 args = parts[1] if len(parts) > 1 else ""
 
                 if cmd in ("/exit", "/quit"):
-                    show_success("До свидания! ⚡")
+                    if agent.messages:
+                        sid = agent.save_session()
+                        console.print(f"\n[bold yellow]⚡ До свидания, Марсель![/bold yellow]")
+                        console.print(f"[dim]Сессия сохранена: [cyan]{sid}[/cyan][/dim]")
+                        console.print(f"[dim]Загрузить: /load {sid}[/dim]\n")
+                    else:
+                        show_success("До свидания! ⚡")
                     break
                 elif cmd == "/help":
                     self._show_help()
@@ -258,6 +275,27 @@ class HephaestusREPL:
                     show_success("История диалога очищена")
                 elif cmd == "/tools":
                     self._show_tools(agent)
+                elif cmd == "/sessions":
+                    sessions = agent.session_manager.list_sessions()
+                    if not sessions:
+                        show_info("Нет сохранённых сессий")
+                    else:
+                        console.print("\n[bold]Последние сессии:[/bold]")
+                        for s in sessions:
+                            console.print(f"  [cyan]{s['id']}[/cyan] — {s['summary']} ([dim]{s['messages']} сообщ.[/dim])")
+                        console.print()
+                elif cmd == "/load":
+                    if not args:
+                        show_error("Укажи ID сессии: /load ses_20260614_123456")
+                    elif agent.load_session(args):
+                        show_success(f"Сессия {args} загружена ({len(agent.messages)} сообщений)")
+                    else:
+                        show_error(f"Сессия {args} не найдена. Используй /sessions")
+                elif cmd == "/save":
+                    sid = agent.save_session()
+                    show_success(f"Сессия сохранена: {sid}")
+                elif cmd == "/learn":
+                    show_info(agent.learning.get_stats())
                 elif cmd == "/history":
                     if HAS_READLINE:
                         n = readline.get_current_history_length()

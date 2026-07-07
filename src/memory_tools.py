@@ -85,7 +85,7 @@ class MemorySearchTool:
         query: str = "",
         type: str = "",
         tags: str = "",
-        min_importance: int | str = 0,
+        min_importance: int = 0,
     ) -> ToolResult:
         """
         Поиск записей в памяти.
@@ -100,7 +100,13 @@ class MemorySearchTool:
             Результат выполнения
         """
         try:
-            tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
+            # Приводим к int — модель может прислать строку "0"
+            try:
+                min_importance = int(min_importance)
+            except (TypeError, ValueError):
+                min_importance = 0
+
+            tag_list = [t.strip() for t in str(tags).split(",") if t.strip()] if tags else None
 
             results = self.memory_system.search(
                 query=query or None,

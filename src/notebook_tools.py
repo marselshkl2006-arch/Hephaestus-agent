@@ -53,7 +53,7 @@ class NotebookReadTool:
             return ToolResult(success=True, output="\n".join(lines))
 
         except Exception as e:
-            return ToolResult(success=False, error=str(e))
+            return ToolResult(success=False, output="", error=str(e))
 
 
 @dataclass
@@ -67,10 +67,12 @@ class NotebookEditTool:
         self,
         file_path: str,
         cell_index: int,
-        new_content: str,
+        new_content: str = "",
+        new_source: str = "",   # алиас — модель часто присылает new_source
     ) -> ToolResult:
         """
         Редактировать ячейку.
+        new_source — алиас для new_content (модели часто присылают new_source).
 
         Args:
             file_path: Путь к .ipynb файлу
@@ -112,7 +114,7 @@ class NotebookEditTool:
             )
 
         except Exception as e:
-            return ToolResult(success=False, error=str(e))
+            return ToolResult(success=False, output="", error=str(e))
 
 
 @dataclass
@@ -162,7 +164,7 @@ class NotebookCreateTool:
             )
 
         except Exception as e:
-            return ToolResult(success=False, error=str(e))
+            return ToolResult(success=False, output="", error=str(e))
 
 
 def create_notebook_tools() -> dict[str, any]:

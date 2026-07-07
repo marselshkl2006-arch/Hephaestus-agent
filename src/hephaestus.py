@@ -28,6 +28,8 @@ from .real_tools import (
     BashTool, FileEditTool, FileReadTool, FileWriteTool,
     GitTool, GlobTool, GrepTool, ToolResult, create_tools,
 )
+from .session_manager import SessionManager
+from .context_learning import ContextLearning
 from .hephaestus_repl import (
     HephaestusREPL,
     ForgeSpinner,
@@ -464,6 +466,9 @@ class HephaestusAgent:
         self.messages: list[LLMMessage] = []
 
         self._init_tools()
+        self.session_manager = SessionManager()
+        self.learning = ContextLearning()
+        self.session_id: str | None = None
 
     def _init_tools(self):
         """Инициализация всех инструментов."""
@@ -486,16 +491,12 @@ class HephaestusAgent:
 
     def _get_tools_schema(self) -> list[dict]:
         """JSON Schema только для подключённых инструментов."""
+        # Инструменты реализованные не напрямую через self.tools[name]
+        ALWAYS_INCLUDE = {'docker_list', 'doc_readme', 'doc_generate', 'github_workflow', 'notebook_edit', 'docker_stop', 'db_schema', 'doc_docstrings', 'diagram_class', 'diagram_flowchart', 'git', 'docker_exec', 'system_monitor', 'docker_logs', 'db_query', 'docker_run'}
+
         schemas = []
         for name, schema in ALL_TOOL_SCHEMAS.items():
-            if name in self.tools:
-                schemas.append({
-                    "name": name,
-                    "description": schema["description"],
-                    "input_schema": schema["input_schema"],
-                })
-            elif name == "git":
-                # git — через bash
+            if name in self.tools or name in ALWAYS_INCLUDE:
                 schemas.append({
                     "name": name,
                     "description": schema["description"],
@@ -607,6 +608,10 @@ class HephaestusAgent:
         self.messages.append(LLMMessage(role="user", content=user_message))
 
         tools_schema = self._get_tools_schema()
+        # Добавляем подсказки контекстного обучения в промпт
+        learning_hint = self.learning.get_context_hint()
+        context_section = ("\n\n## Контекст из прошлого опыта:\n" + learning_hint) if learning_hint else ""
+        dynamic_system = SYSTEM_PROMPT + context_section
         max_iterations = 10
         last_tool_signatures: list[str] = []  # для детекта зацикливания
 
@@ -615,7 +620,7 @@ class HephaestusAgent:
                 response = self.llm_client.complete_with_tools(
                     messages=self.messages,
                     tools=tools_schema,
-                    system=SYSTEM_PROMPT,
+                    system=dynamic_system,
                 )
             except Exception as e:
                 return f"❌ Ошибка LLM: {e}"
@@ -662,6 +667,11 @@ class HephaestusAgent:
                 show_tool_call(name, json.dumps(params, ensure_ascii=False)[:100])
                 result = self.execute_tool(name, **params)
                 show_tool_result(result.output or result.error or "", result.success)
+                # Контекстное обучение
+                if result.success:
+                    self.learning.record_success(name, params)
+                else:
+                    self.learning.record_failure(name, result.error or "", params)
 
                 tool_results.append(
                     f"[{call_id}] {name}: {'OK' if result.success else 'ERROR'}\n"
@@ -675,6 +685,22 @@ class HephaestusAgent:
 
     def reset(self):
         self.messages = []
+
+    def save_session(self) -> str:
+        """Сохранить текущую сессию."""
+        sid = self.session_manager.save(self.messages)
+        self.session_id = sid
+        return sid
+
+    def load_session(self, session_id: str) -> bool:
+        """Загрузить сессию по ID."""
+        from .llm_client import LLMMessage
+        messages_data = self.session_manager.load(session_id)
+        if messages_data is None:
+            return False
+        self.messages = [LLMMessage(role=m["role"], content=m["content"]) for m in messages_data]
+        self.session_id = session_id
+        return True
 
 
 # ─────────────────────────────────────────────────────────────────────────────

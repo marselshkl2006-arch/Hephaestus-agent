@@ -25,3 +25,4 @@ pytest-cov>=5.0.0          # Coverage отчёты
 # readline уже встроен в Python на Linux/Mac
 # На Windows может потребоваться:
 # pyreadline3>=3.4.1
+prompt_toolkit>=3.0.0       # Надёжный промпт без бага с backspace
