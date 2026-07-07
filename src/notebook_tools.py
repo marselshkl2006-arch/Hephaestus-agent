@@ -27,13 +27,13 @@ class NotebookReadTool:
         Returns:
             Результат выполнения
         """
+        if new_source and not new_content:
+            new_content = new_source
+
         try:
             path = Path(file_path)
             if not path.exists():
-                return ToolResult(
-                    success=False,
-                    error=f"Файл не найден: {file_path}",
-                )
+                return ToolResult(success=False, output="", error=f"Файл не найден: {file_path}")
 
             with open(path) as f:
                 notebook = json.load(f)
@@ -82,13 +82,13 @@ class NotebookEditTool:
         Returns:
             Результат выполнения
         """
+        if new_source and not new_content:
+            new_content = new_source
+
         try:
             path = Path(file_path)
             if not path.exists():
-                return ToolResult(
-                    success=False,
-                    error=f"Файл не найден: {file_path}",
-                )
+                return ToolResult(success=False, output="", error=f"Файл не найден: {file_path}")
 
             with open(path) as f:
                 notebook = json.load(f)
@@ -96,10 +96,7 @@ class NotebookEditTool:
             cells = notebook.get("cells", [])
 
             if cell_index < 0 or cell_index >= len(cells):
-                return ToolResult(
-                    success=False,
-                    error=f"Неверный индекс ячейки: {cell_index}",
-                )
+                return ToolResult(success=False, output="", error=f"Неверный индекс ячейки: {cell_index}")
 
             # Обновляем содержимое
             cells[cell_index]["source"] = new_content.split("\n")

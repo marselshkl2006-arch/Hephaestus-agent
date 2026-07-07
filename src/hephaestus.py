@@ -591,12 +591,85 @@ class HephaestusAgent:
                         new_content=kwargs.get("new_content", kwargs.get("new_source", "")),
                     )
 
+            # === DOCKER ===
+            elif tool_name == "docker_list":
+                t = self.tools.get("docker")
+                if t: return t.list_containers(all_containers=kwargs.get("all", False))
+            elif tool_name == "docker_run":
+                t = self.tools.get("docker")
+                if t:
+                    ports = {}
+                    raw = kwargs.get("ports", "")
+                    if raw:
+                        try:
+                            h_port, c_port = str(raw).split(":")
+                            ports = {f"{c_port}/tcp": int(h_port)}
+                        except Exception:
+                            pass
+                    return t.run_container(image=kwargs.get("image",""), command=kwargs.get("command"),
+                        name=kwargs.get("name"), ports=ports, detach=kwargs.get("detach", True))
+            elif tool_name == "docker_stop":
+                t = self.tools.get("docker")
+                if t: return t.stop_container(kwargs.get("container",""))
+            elif tool_name == "docker_logs":
+                t = self.tools.get("docker")
+                if t: return t.logs(kwargs.get("container",""), tail=kwargs.get("tail", 100))
+            elif tool_name == "docker_exec":
+                t = self.tools.get("docker")
+                if t: return t.exec_command(kwargs.get("container",""), kwargs.get("command",""))
+
+            # === БАЗА ДАННЫХ ===
+            elif tool_name == "db_query":
+                t = self.tools.get("database")
+                if t: return t.query(database=kwargs.get("database",""),
+                    query=kwargs.get("query",""), db_type=kwargs.get("db_type","sqlite"))
+            elif tool_name == "db_schema":
+                t = self.tools.get("database")
+                if t: return t.get_schema(database=kwargs.get("database",""),
+                    db_type=kwargs.get("db_type","sqlite"))
+
+            # === СИСТЕМА ===
+            elif tool_name == "system_monitor":
+                t = self.tools.get("system_monitor")
+                if t: return t.monitor(target=kwargs.get("target","all"),
+                    detailed=kwargs.get("detailed", False))
+
+            # === ДИАГРАММЫ ===
+            elif tool_name == "diagram_class":
+                t = self.tools.get("diagram")
+                if t: return t.generate_class_diagram(file_path=kwargs.get("file_path",""),
+                    format=kwargs.get("format","mermaid"))
+            elif tool_name == "diagram_flowchart":
+                t = self.tools.get("diagram")
+                if t: return t.generate_flowchart(file_path=kwargs.get("file_path",""),
+                    function_name=kwargs.get("function_name",""))
+
+            # === ДОКУМЕНТАЦИЯ ===
+            elif tool_name == "doc_generate":
+                t = self.tools.get("doc_generator")
+                if t: return t.generate_api_docs(file_path=kwargs.get("file_path",""))
+            elif tool_name == "doc_readme":
+                t = self.tools.get("doc_generator")
+                if t: return t.generate_readme(project_path=kwargs.get("project_path","."))
+            elif tool_name == "doc_docstrings":
+                t = self.tools.get("doc_generator")
+                if t: return t.generate_docstrings(file_path=kwargs.get("file_path",""))
+
+            # === GITHUB ACTIONS ===
+            elif tool_name == "github_workflow":
+                t = self.tools.get("github")
+                if t: return t.create_workflow_file(name=kwargs.get("name",""),
+                    trigger=kwargs.get("trigger","push"), jobs=kwargs.get("jobs",""))
+
             # Generic fallback
-            if tool:
-                if hasattr(tool, "execute"):
-                    return tool.execute(**kwargs)
-                elif hasattr(tool, "run"):
-                    return tool.run(**kwargs)
+            elif tool:
+                try:
+                    if hasattr(tool, "execute"):
+                        return tool.execute(**kwargs)
+                    elif hasattr(tool, "run"):
+                        return tool.run(**kwargs)
+                except Exception as e:
+                    return ToolResult(success=False, output="", error=str(e))
 
         except Exception as e:
             return ToolResult(success=False, output="", error=str(e))
