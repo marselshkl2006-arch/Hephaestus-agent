@@ -66,7 +66,7 @@ class HephaestusTelegramBot:
                 f"/tools — список инструментов\n"
                 f"/allow <id> — добавить пользователя\n\n"
                 f"Просто пиши запросы и я их выполню!",
-                parse_mode="Markdown"
+                parse_mode="HTML"
             )
 
         async def reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -84,7 +84,7 @@ class HephaestusTelegramBot:
                 text += f"• `{s['name']}` — {s['description'][:40]}\n"
             if len(schemas) > 20:
                 text += f"...и ещё {len(schemas)-20}"
-            await update.message.reply_text(text, parse_mode="Markdown")
+            await update.message.reply_text(text, parse_mode="HTML")
 
         async def allow_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if ctx.args:
@@ -103,7 +103,7 @@ class HephaestusTelegramBot:
                 await update.message.reply_text(
                     f"⛔ Доступ запрещён.\nТвой ID: `{user_id}`\n"
                     f"Попроси владельца добавить тебя через /allow {user_id}",
-                    parse_mode="Markdown"
+                    parse_mode="HTML"
                 )
                 return
 
@@ -112,7 +112,7 @@ class HephaestusTelegramBot:
                 return
 
             text = update.message.text
-            await update.message.reply_text("⚒ Кую...", parse_mode="Markdown")
+            await update.message.reply_text("⚒ Кую...", parse_mode="HTML")
 
             # Запускаем агента в отдельном потоке
             loop = asyncio.get_event_loop()

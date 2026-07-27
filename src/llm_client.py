@@ -8,7 +8,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Callable
 
 try:
     import requests
@@ -29,6 +29,8 @@ class LLMProvider(Enum):
     ANTHROPIC = "anthropic"
     OPENROUTER = "openrouter"
     KOBOLDCPP = "koboldcpp"
+    LLAMA_SERVER = "llama_server"      # 🔥 НОВЫЙ! Для llama.cpp сервер
+    CUSTOM = "custom"                  # 🔥 НОВЫЙ! Кастомный OpenAI-совместимый
 
 
 @dataclass
@@ -52,7 +54,7 @@ class LLMConfig:
     model: str
     api_key: str | None = None
     base_url: str | None = None
-    temperature: float = 0.1   # Низкая температура для надёжного JSON
+    temperature: float = 0.1
     max_tokens: int = 4096
     stream: bool = False
 
@@ -78,26 +80,27 @@ class LLMClient(ABC):
     "param2": "value2"
   }}
 }}
-```
-
 Available tools:
 {tools_json}
 
 IMPORTANT:
-- Respond with ONLY the JSON object if you want to use a tool
-- No extra text before or after the JSON when calling a tool
-- Use the exact parameter names from the schema
-- If you don't need a tool, just respond normally in text"""
+
+Respond with ONLY the JSON object if you want to use a tool
+
+No extra text before or after the JSON when calling a tool
+
+Use the exact parameter names from the schema
+
+If you don't need a tool, just respond normally in text"""
 
     def _parse_json_tool_call(self, text: str) -> list[dict]:
         """Парсим JSON tool call из ответа модели."""
         tool_use_blocks = []
 
-        # Ищем JSON в markdown блоке ```json ... ```
         patterns = [
-            r'```json\s*(\{.*?\})\s*```',
-            r'```\s*(\{.*?\})\s*```',
-            r'(\{\s*"tool"\s*:.*?\})',
+            r'json\s*(\{.*?\})\s*',
+            r'\s*(\{.*?\})\s*',
+            r'({\s"tool"\s:.*?})',
         ]
 
         for pattern in patterns:
@@ -120,27 +123,15 @@ IMPORTANT:
         return tool_use_blocks
 
     def _extract_tool_calls(self, text: str) -> list[dict]:
-        """
-        Извлекаем tool calls из текста модели в любом формате:
-        1. {"name": "tool", "arguments": {...}}        ← OpenAI-подобный
-        2. {"name": "tool", "parameters": {...}}       ← вариант
-        3. {"tool": "tool", "params": {...}}           ← наш fallback формат
-        4. ```json {...} ```                           ← в markdown блоке
-        5. Несколько JSON объектов в тексте           ← мульти-вызов
-        """
-        import re
+        """Извлекаем tool calls из текста модели в любом формате."""
         results = []
         seen = set()
 
-        # Кандидаты на JSON — сначала markdown блоки, потом голые объекты
         candidates = []
-        for pattern in [r'```json\s*(\{.*?\})\s*```', r'```\s*(\{.*?\})\s*```']:
+        for pattern in [r'json\s*(\{.*?\})\s*', r'\s*(\{.*?\})\s*']:
             candidates += re.findall(pattern, text, re.DOTALL)
-        # Голые JSON объекты (жадный поиск всех { ... })
-        for m in re.finditer(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', text, re.DOTALL):
+        for m in re.finditer(r'{[^{}](?:{[^{}]}[^{}])}', text, re.DOTALL):
             candidates.append(m.group())
-
-        known_tools = set()  # заполним из схем если нужно
 
         for raw in candidates:
             try:
@@ -151,31 +142,31 @@ IMPORTANT:
             name = None
             args = {}
 
-            # Формат: {"name": ..., "arguments": ...}
             if "name" in data and "arguments" in data:
                 name = data["name"]
                 args = data["arguments"]
                 if isinstance(args, str):
-                    try: args = json.loads(args)
-                    except: args = {}
+                    try:
+                        args = json.loads(args)
+                    except Exception:
+                        args = {}
 
-            # Формат: {"name": ..., "parameters": ...}
             elif "name" in data and "parameters" in data:
                 name = data["name"]
                 args = data["parameters"]
 
-            # Формат: {"tool": ..., "params": ...}
             elif "tool" in data and "params" in data:
                 name = data["tool"]
                 args = data.get("params", {})
 
-            # Формат: {"tool": ..., "arguments": ...}
             elif "tool" in data and "arguments" in data:
                 name = data["tool"]
                 args = data["arguments"]
                 if isinstance(args, str):
-                    try: args = json.loads(args)
-                    except: args = {}
+                    try:
+                        args = json.loads(args)
+                    except Exception:
+                        args = {}
 
             if not name or not isinstance(args, dict):
                 continue
@@ -219,6 +210,200 @@ IMPORTANT:
         system: str | None = None
     ) -> LLMResponse:
         return self._fallback_tool_calling(messages, tools, system)
+
+
+# ─────────────────────────────────────────
+# LlamaServerClient — для llama.cpp сервера
+# ─────────────────────────────────────────
+class LlamaServerClient(LLMClient):
+    """Клиент для llama.cpp сервера (OpenAI-совместимый API)."""
+
+    def __init__(self, config: LLMConfig):
+        super().__init__(config)
+        if not HAS_OPENAI:
+            raise ImportError("openai library required: pip install openai")
+        base_url = config.base_url or os.getenv("LLAMA_SERVER_URL", "http://127.0.0.1:8080")
+        self.base_url = base_url.rstrip("/")
+        self.client = openai.OpenAI(
+            api_key="not-needed",
+            base_url=f"{self.base_url}/v1"
+        )
+        # Сохраняем имя модели
+        self.model_name = config.model or "default"
+
+    def complete(self, messages: list[LLMMessage], system: str | None = None) -> LLMResponse:
+        oai_messages = []
+        if system:
+            oai_messages.append({"role": "system", "content": system})
+        for m in messages:
+            oai_messages.append({"role": m.role, "content": m.content})
+
+        try:
+            response = self.client.chat.completions.create(
+                model="default",
+                messages=oai_messages,
+                temperature=self.config.temperature,
+                max_tokens=self.config.max_tokens,
+            )
+
+            content = response.choices[0].message.content or ""
+
+            return LLMResponse(
+                content=content,
+                stop_reason=response.choices[0].finish_reason or "stop",
+                usage={
+                    "prompt_tokens": response.usage.prompt_tokens,
+                    "completion_tokens": response.usage.completion_tokens,
+                },
+                model=self.model_name,
+            )
+        except Exception as e:
+            # Если ошибка — пробуем через requests напрямую (fallback)
+            return self._fallback_complete(messages, system)
+
+    def _fallback_complete(self, messages: list[LLMMessage], system: str | None = None) -> LLMResponse:
+        """Fallback через requests если openai клиент не работает."""
+        import requests
+
+        url = f"{self.base_url}/v1/chat/completions"
+        payload = {
+            "model": "default",
+            "messages": [{"role": m.role, "content": m.content} for m in messages],
+            "temperature": self.config.temperature,
+            "max_tokens": self.config.max_tokens,
+        }
+        if system:
+            payload["messages"].insert(0, {"role": "system", "content": system})
+
+        response = requests.post(url, json=payload, timeout=600)
+        response.raise_for_status()
+        data = response.json()
+
+        content = data["choices"][0]["message"]["content"]
+
+        return LLMResponse(
+            content=content,
+            stop_reason=data["choices"][0].get("finish_reason", "stop"),
+            usage=data.get("usage", {}),
+            model=self.model_name,
+        )
+
+    def complete_with_tools(
+        self,
+        messages: list[LLMMessage],
+        tools: list[dict],
+        system: str | None = None
+    ) -> LLMResponse:
+        """Tool calling через JSON fallback (llama-server не поддерживает нативный tools)."""
+        # Просто используем fallback с JSON промптом
+        return self._fallback_tool_calling(messages, tools, system)
+
+# ─────────────────────────────────────────
+# CustomClient — для любых OpenAI-совместимых API
+# ─────────────────────────────────────────
+class CustomClient(LLMClient):
+    """Кастомный клиент для OpenAI-совместимых API (любой сервер)."""
+
+    def __init__(self, config: LLMConfig):
+        super().__init__(config)
+        if not HAS_OPENAI:
+            raise ImportError("openai library required: pip install openai")
+        if not config.base_url:
+            raise ValueError("base_url required for custom provider")
+        api_key = config.api_key or os.getenv("CUSTOM_API_KEY", "not-needed")
+        self.client = openai.OpenAI(
+            api_key=api_key,
+            base_url=config.base_url.rstrip("/")
+        )
+
+    def complete(self, messages: list[LLMMessage], system: str | None = None) -> LLMResponse:
+        oai_messages = []
+        if system:
+            oai_messages.append({"role": "system", "content": system})
+        for m in messages:
+            oai_messages.append({"role": m.role, "content": m.content})
+
+        response = self.client.chat.completions.create(
+            model=self.config.model,
+            messages=oai_messages,
+            temperature=self.config.temperature,
+            max_tokens=self.config.max_tokens,
+        )
+
+        return LLMResponse(
+            content=response.choices[0].message.content or "",
+            stop_reason=response.choices[0].finish_reason or "stop",
+            usage={
+                "prompt_tokens": response.usage.prompt_tokens,
+                "completion_tokens": response.usage.completion_tokens,
+            },
+            model=response.model or self.config.model,
+        )
+
+    def complete_with_tools(
+        self,
+        messages: list[LLMMessage],
+        tools: list[dict],
+        system: str | None = None
+    ) -> LLMResponse:
+        """Нативный tool calling через кастомный OpenAI-совместимый API."""
+        oai_messages = []
+        if system:
+            oai_messages.append({"role": "system", "content": system})
+        for m in messages:
+            oai_messages.append({"role": m.role, "content": m.content})
+
+        oai_tools = []
+        for t in tools:
+            oai_tools.append({
+                "type": "function",
+                "function": {
+                    "name": t["name"],
+                    "description": t.get("description", ""),
+                    "parameters": t.get("input_schema", {"type": "object", "properties": {}}),
+                },
+            })
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.config.model,
+                messages=oai_messages,
+                tools=oai_tools,
+                tool_choice="auto",
+                temperature=self.config.temperature,
+                max_tokens=self.config.max_tokens,
+            )
+
+            message = response.choices[0].message
+            tool_use_blocks = []
+            if message.tool_calls:
+                for tc in message.tool_calls:
+                    try:
+                        args = json.loads(tc.function.arguments)
+                    except json.JSONDecodeError:
+                        args = {}
+                    tool_use_blocks.append({
+                        "id": tc.id,
+                        "name": tc.function.name,
+                        "input": args,
+                    })
+
+            if not tool_use_blocks and message.content:
+                tool_use_blocks = self._extract_tool_calls(message.content)
+
+            return LLMResponse(
+                content=message.content or "",
+                stop_reason="tool_use" if tool_use_blocks else response.choices[0].finish_reason,
+                usage={
+                    "prompt_tokens": response.usage.prompt_tokens,
+                    "completion_tokens": response.usage.completion_tokens,
+                },
+                model=response.model,
+                tool_use_blocks=tool_use_blocks if tool_use_blocks else None,
+            )
+
+        except Exception:
+            return self._fallback_tool_calling(messages, tools, system)
 
 
 # ─────────────────────────────────────────
@@ -271,7 +456,6 @@ class AnthropicClient(LLMClient):
         tools: list[dict],
         system: str | None = None
     ) -> LLMResponse:
-        """Нативный tool calling через Anthropic API."""
         anthropic_messages = []
         for m in messages:
             if m.role == "system":
@@ -281,7 +465,6 @@ class AnthropicClient(LLMClient):
             else:
                 anthropic_messages.append({"role": m.role, "content": m.content})
 
-        # Anthropic формат: input_schema
         anthropic_tools = []
         for t in tools:
             anthropic_tools.append({
@@ -369,7 +552,6 @@ class OpenAIClient(LLMClient):
         tools: list[dict],
         system: str | None = None
     ) -> LLMResponse:
-        """Нативный tool calling через OpenAI API."""
         oai_messages = []
         if system:
             oai_messages.append({"role": "system", "content": system})
@@ -379,7 +561,6 @@ class OpenAIClient(LLMClient):
             else:
                 oai_messages.append({"role": m.role, "content": str(m.content)})
 
-        # OpenAI формат
         oai_tools = []
         for t in tools:
             oai_tools.append({
@@ -427,7 +608,7 @@ class OpenAIClient(LLMClient):
 
 
 # ─────────────────────────────────────────
-# Ollama — нативный tool calling через /v1
+# Ollama
 # ─────────────────────────────────────────
 class OllamaClient(LLMClient):
     def __init__(self, config: LLMConfig):
@@ -473,9 +654,7 @@ class OllamaClient(LLMClient):
         tools: list[dict],
         system: str | None = None
     ) -> LLMResponse:
-        """Нативный tool calling через OpenAI-совместимый /v1 endpoint Ollama."""
         if not HAS_OPENAI:
-            # Fallback на JSON промпт если нет openai
             return self._fallback_tool_calling(messages, tools, system)
 
         client = openai.OpenAI(api_key="ollama", base_url=f"{self.base_url}/v1")
@@ -489,7 +668,6 @@ class OllamaClient(LLMClient):
             else:
                 oai_messages.append({"role": m.role, "content": str(m.content)})
 
-        # OpenAI формат для Ollama
         oai_tools = []
         for t in tools:
             oai_tools.append({
@@ -525,7 +703,6 @@ class OllamaClient(LLMClient):
                         "input": args,
                     })
 
-            # Если нативный tool_calls пустой — парсим JSON из текста
             if not tool_use_blocks and message.content:
                 tool_use_blocks = self._extract_tool_calls(message.content)
 
@@ -540,8 +717,6 @@ class OllamaClient(LLMClient):
                 tool_use_blocks=tool_use_blocks if tool_use_blocks else None,
             )
         except Exception as _e:
-            # Нативный tool calling не сработал — используем JSON fallback
-            # Это нормально для моделей которые не поддерживают tools параметр
             return self._fallback_tool_calling(messages, tools, system)
 
     def stream_complete_with_tools(
@@ -549,9 +724,8 @@ class OllamaClient(LLMClient):
         messages: list[LLMMessage],
         tools: list[dict],
         system: str | None = None,
-        on_token: "Callable[[str], None] | None" = None,
-    ) -> "LLMResponse":
-        """Streaming с выводом токенов в реальном времени, потом парсим tool calls."""
+        on_token: Callable[[str], None] | None = None,
+    ) -> LLMResponse:
         if not HAS_OPENAI:
             return self._fallback_tool_calling(messages, tools, system)
 
@@ -589,12 +763,10 @@ class OllamaClient(LLMClient):
                 delta = chunk.choices[0].delta if chunk.choices else None
                 if not delta:
                     continue
-                # Текстовые токены
                 if delta.content:
                     full_content += delta.content
                     if on_token:
                         on_token(delta.content)
-                # Tool calls накапливаем
                 if delta.tool_calls:
                     for tc in delta.tool_calls:
                         idx = tc.index
@@ -604,11 +776,10 @@ class OllamaClient(LLMClient):
                             tool_calls_raw[idx]["id"] = tc.id
                         if tc.function:
                             if tc.function.name:
-                                tool_calls_raw[idx]["name"] += tc.function.name
+                                tool_calls_raw[idx][name] += tc.function.name
                             if tc.function.arguments:
                                 tool_calls_raw[idx]["args"] += tc.function.arguments
 
-            # Парсим tool calls
             tool_use_blocks = []
             for tc in tool_calls_raw:
                 if tc["name"]:
@@ -622,7 +793,6 @@ class OllamaClient(LLMClient):
                         "input": args,
                     })
 
-            # Если нет нативных tool calls — парсим из текста
             if not tool_use_blocks and full_content:
                 tool_use_blocks = self._extract_tool_calls(full_content)
 
@@ -709,7 +879,6 @@ class OpenRouterClient(LLMClient):
         tools: list[dict],
         system: str | None = None
     ) -> LLMResponse:
-        """Нативный tool calling через OpenRouter."""
         oai_messages = []
         if system:
             oai_messages.append({"role": "system", "content": system})
@@ -801,8 +970,6 @@ class KoboldCPPClient(LLMClient):
             model=response.model,
         )
 
-    # complete_with_tools наследуется как JSON fallback — KoboldCPP не поддерживает нативный
-
 
 # ─────────────────────────────────────────
 # Factory
@@ -818,12 +985,21 @@ def create_llm_client(config: LLMConfig) -> LLMClient:
         return OpenRouterClient(config)
     elif config.provider == LLMProvider.KOBOLDCPP:
         return KoboldCPPClient(config)
+    elif config.provider == LLMProvider.LLAMA_SERVER:
+        return LlamaServerClient(config)
+    elif config.provider == LLMProvider.CUSTOM:
+        return CustomClient(config)
     else:
         raise ValueError(f"Unknown provider: {config.provider}")
 
 
 def auto_detect_provider() -> tuple[LLMProvider, str]:
     """Авто-определение провайдера по переменным окружения."""
+
+    # Сначала проверяем llama-server
+    if os.getenv("LLAMA_SERVER_URL"):
+        return LLMProvider.LLAMA_SERVER, os.getenv("LLAMA_MODEL", "qwen3.6-27b-uncensored")
+
     if os.getenv("ANTHROPIC_API_KEY"):
         return LLMProvider.ANTHROPIC, "claude-3-5-sonnet-20241022"
     if os.getenv("OPENROUTER_API_KEY"):

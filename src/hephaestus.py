@@ -1312,7 +1312,7 @@ def main():
         """
     )
     parser.add_argument("query", nargs="?", help="Одиночный запрос")
-    parser.add_argument("--provider", choices=["ollama", "openai", "anthropic", "openrouter", "koboldcpp"])
+    parser.add_argument("--provider", choices=["ollama", "openai", "anthropic", "openrouter", "koboldcpp","llama_server", "custom"])
     parser.add_argument("--model", help="Название модели")
     parser.add_argument("--base-url", help="Базовый URL (для Ollama/KoboldCPP)")
     parser.add_argument("--api-key", help="API ключ")

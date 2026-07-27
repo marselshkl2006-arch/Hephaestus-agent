@@ -32,3 +32,6 @@ python-telegram-bot>=20.0    # Telegram бот
 
 # === Web Surfer ===
 trafilatura>=1.6.0           # Лучший парсер текста из HTML (опционально)
+
+# ─── Telegram_bot ──────────────────────────────────────────
+python-telegram-bot>=20.0    # Telegram бот
