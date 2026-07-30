@@ -1,11 +1,24 @@
 """
 Goal Mode — режим достижения цели.
-Агент сам разбивает цель на шаги и выполняет их до конца.
-Plan → Execute → Verify → Report
+
+Раньше здесь был отдельный статичный планировщик: одним вызовом LLM
+составлялся фиксированный список шагов (JSON), после чего шаги слепо
+выполнялись один за другим — без реакции на промежуточные результаты,
+без возможности сделать несколько инструментов ради одного шага, и с
+мёртвым VERIFY_PROMPT, который никогда не вызывался.
+
+Теперь Goal Mode — тонкая обвязка над тем же адаптивным циклом
+инструментов, что и обычный chat(): модель сама решает, что делать
+дальше, на основе РЕАЛЬНЫХ результатов уже выполненных шагов, может
+использовать сколько угодно инструментов подряд, сама себя
+перепланирует при неудаче, и продолжает пока не сочтёт цель
+выполненной (или не кончится бюджет итераций). Список шагов для
+отчёта и обучения skill_learner собирается постфактум из реально
+выполненных вызовов инструментов (через _progress_hook), а не
+придумывается заранее.
 """
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -17,7 +30,7 @@ class GoalStep:
     description: str
     tool: str = ""
     params: dict = field(default_factory=dict)
-    status: str = "pending"  # pending, done, failed, skipped
+    status: str = "pending"  # pending, done, failed
     result: str = ""
 
 
@@ -31,35 +44,28 @@ class Goal:
 
 class GoalModeAgent:
     """
-    Режим цели — агент планирует и выполняет до конца.
-    Использует основной агент для выполнения шагов.
+    Режим цели — прогоняет цель через адаптивный цикл инструментов
+    основного агента, наблюдая за каждым реальным вызовом инструмента,
+    чтобы построить чек-лист/отчёт и накормить skill_learner.
     """
 
-    PLAN_PROMPT = """Ты планировщик задач. Пользователь дал тебе ЦЕЛЬ.
-Разбей её на конкретные шаги. Каждый шаг — один вызов инструмента.
+    # Системная рамка поверх обычного SYSTEM_PROMPT — не меняет формат
+    # вызовов (<tool_call>...), а только говорит модели не
+    # останавливаться после одного действия.
+    GOAL_FRAMING = """ЗАДАЧА ВЫШЕ — это ЦЕЛЬ, а не разовый запрос.
 
-ЦЕЛЬ: {goal}
+Работай самостоятельно, шаг за шагом, вызывая столько инструментов
+подряд, сколько нужно. Если для цели нужно сначала что-то изучить
+(структуру проекта, существующий код, репозиторий) — сделай это
+ПЕРЕД тем как писать/создавать что-либо, и используй увиденное.
+Если какой-то шаг не удался — не сдавайся, попробуй скорректировать
+подход и продолжай.
 
-Доступные инструменты: {tools}
+Останавливайся и пиши финальный текстовый ответ ТОЛЬКО когда цель
+полностью выполнена (или ты уверен, что дальше двигаться нельзя).
+Не проси подтверждения — действуй."""
 
-ВАЖНО для шагов с кодом:
-- Если нужно написать файл с кодом — используй file_write с ПОЛНЫМ кодом в params.content
-- НЕ создавай пустые файлы — сразу пиши весь код
-- Для Python файлов: content должен содержать весь рабочий Python код
-
-Ответь JSON массивом шагов:
-[
-  {{"step": 1, "description": "что делаем", "tool": "tool_name", "params": {{"key": "value"}}}},
-  {{"step": 2, "description": "что делаем", "tool": "bash", "params": {{"command": "python3 file.py"}}}}
-]
-
-Только JSON, без лишнего текста."""
-
-    VERIFY_PROMPT = """Шаг выполнен. Проверь результат.
-Шаг: {step}
-Результат: {result}
-
-Ответь одним словом: SUCCESS или FAILED или RETRY"""
+    MAX_GOAL_ITERATIONS = 80  # цели обычно требуют больше шагов, чем обычный чат
 
     def __init__(self, agent, on_progress: Callable | None = None):
         self.agent = agent
@@ -67,92 +73,63 @@ class GoalModeAgent:
         self.current_goal: Goal | None = None
 
     def pursue(self, goal_text: str, save_report_to: str = "") -> str:
-        """Выполнить цель от начала до конца."""
+        """Выполнить цель от начала до конца через адаптивный цикл инструментов."""
         self.on_progress(f"\n🎯 Цель: {goal_text}")
-        self.on_progress("⚙️  Составляю план...")
 
-        goal = Goal(description=goal_text)
+        goal = Goal(description=goal_text, status="executing")
         self.current_goal = goal
 
-        # 1. Планирование
-        tools_list = ", ".join(s["name"] for s in self.agent._get_tools_schema()[:20])
-        plan_prompt = self.PLAN_PROMPT.format(goal=goal_text, tools=tools_list)
+        # Наблюдаем за каждым реальным вызовом инструмента внутри chat(),
+        # чтобы построить чек-лист постфактум — без выдумывания шагов заранее.
+        def _on_tool_executed(name: str, params: dict, result) -> None:
+            step_num = len(goal.steps) + 1
+            status = "done" if result.success else "failed"
+            text_result = result.output if result.success else (result.error or "")
+            goal.steps.append(GoalStep(
+                step_num=step_num,
+                description=f"{name}({', '.join(f'{k}={v!r}' for k, v in list(params.items())[:3])})",
+                tool=name,
+                params=params,
+                status=status,
+                result=text_result,
+            ))
+            icon = "✅" if result.success else "❌"
+            self.on_progress(f"⚒️  Шаг {step_num}: {name} — {icon} {str(text_result)[:100]}")
 
+        goal_prompt = f"{goal_text}\n\n{self.GOAL_FRAMING}"
+
+        self.agent._progress_hook = _on_tool_executed
         try:
-            from .llm_client import LLMMessage
-            plan_response = self.agent.llm_client.complete(
-                messages=[LLMMessage(role="user", content=plan_prompt)],
-                system="Ты помощник-планировщик. Отвечай только JSON."
+            final_text = self.agent.chat(
+                goal_prompt,
+                max_iterations=self.MAX_GOAL_ITERATIONS,
+                force_all_tools=True,
             )
-
-            raw = plan_response.content.strip()
-            # Извлекаем JSON
-            import re
-            match = re.search(r"\[.*\]", raw, re.DOTALL)
-            if match:
-                steps_data = json.loads(match.group())
-            else:
-                steps_data = json.loads(raw)
-
-            for s in steps_data:
-                goal.steps.append(GoalStep(
-                    step_num=s.get("step", len(goal.steps) + 1),
-                    description=s.get("description", ""),
-                    tool=s.get("tool", "bash"),
-                    params=s.get("params", {}),
-                ))
-
         except Exception as e:
-            # Fallback — выполняем как обычный запрос
-            self.on_progress(f"⚠️  Не удалось составить план: {e}")
-            self.on_progress("⚡ Выполняю напрямую...")
-            return self.agent.chat(goal_text)
+            self.on_progress(f"⚠️  Ошибка при выполнении цели: {e}")
+            final_text = f"Цель прервана ошибкой: {e}"
+        finally:
+            self.agent._progress_hook = None
 
-        if not goal.steps:
-            return self.agent.chat(goal_text)
-
-        self.on_progress(f"📋 План: {len(goal.steps)} шагов")
-        for s in goal.steps:
-            self.on_progress(f"  {s.step_num}. {s.description}")
-
-        # 2. Выполнение
-        goal.status = "executing"
-        results = []
-
-        for step in goal.steps:
-            self.on_progress(f"\n⚒️  Шаг {step.step_num}: {step.description}")
-
-            try:
-                result = self.agent.execute_tool(step.tool, **step.params)
-                step.result = result.output if result.success else result.error
-                step.status = "done" if result.success else "failed"
-
-                icon = "✅" if result.success else "❌"
-                self.on_progress(f"   {icon} {step.result[:100]}")
-                results.append(f"Шаг {step.step_num} ({step.status}): {step.result[:200]}")
-
-            except Exception as e:
-                step.status = "failed"
-                step.result = str(e)
-                self.on_progress(f"   ❌ Ошибка: {e}")
-                results.append(f"Шаг {step.step_num} (failed): {e}")
-
-        # 3. Финальный отчёт
-        goal.status = "done"
         done = sum(1 for s in goal.steps if s.status == "done")
         failed = sum(1 for s in goal.steps if s.status == "failed")
+        goal.status = "done" if failed == 0 else ("failed" if done == 0 else "done")
 
         report_lines = [
             f"## Отчёт по цели: {goal_text}\n",
-            f"✅ Выполнено: {done}/{len(goal.steps)}",
+            f"✅ Выполнено шагов: {done}",
             f"❌ Ошибок: {failed}\n",
-            "### Шаги:",
         ]
-        for s in goal.steps:
-            icon = "✅" if s.status == "done" else "❌"
-            report_lines.append(f"{icon} {s.step_num}. {s.description}")
-            if s.result:
-                report_lines.append(f"   Результат: {s.result[:150]}")
+        if goal.steps:
+            report_lines.append("### Шаги:")
+            for s in goal.steps:
+                icon = "✅" if s.status == "done" else "❌"
+                report_lines.append(f"{icon} {s.step_num}. {s.description}")
+                if s.result:
+                    report_lines.append(f"   Результат: {str(s.result)[:150]}")
+            report_lines.append("")
+        report_lines.append("### Итог модели:")
+        report_lines.append(final_text or "(без финального текста)")
 
         report = "\n".join(report_lines)
         goal.report = report
@@ -162,5 +139,5 @@ class GoalModeAgent:
             Path(save_report_to).write_text(report, encoding="utf-8")
             self.on_progress(f"\n💾 Отчёт сохранён: {save_report_to}")
 
-        self.on_progress(f"\n🏁 Цель выполнена: {done}/{len(goal.steps)} шагов")
+        self.on_progress(f"\n🏁 Цель завершена: {done} шагов выполнено, {failed} ошибок")
         return report

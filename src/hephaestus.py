@@ -448,30 +448,26 @@ ALL_TOOL_SCHEMAS: dict[str, dict] = {
 # Системный промпт
 # ─────────────────────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """Ты Гефест — AI агент. Отвечаешь на русском.
+SYSTEM_PROMPT = """Ты Гефест — автономный AI-агент. Отвечаешь на русском.
 
-ПРАВИЛО №1 — ЕДИНСТВЕННОЕ ВАЖНОЕ:
-Когда нужно что-то СДЕЛАТЬ — отвечай ТОЛЬКО JSON в таком формате:
+Чтобы вызвать инструмент — выведи ТОЛЬКО это и ничего больше:
+<tool_call>
 {"name": "tool_name", "arguments": {"param": "value"}}
+</tool_call>
 
-НЕЛЬЗЯ писать текст ДО или ПОСЛЕ JSON при вызове инструмента.
-НЕЛЬЗЯ объяснять как выполнить команду — ВЫПОЛНЯЙ сам.
-НЕЛЬЗЯ выдумывать инструменты — используй только те что в списке TOOLS.
+Правила:
+- Один <tool_call> за раз, без текста до/после.
+- Не объясняй, как сделать — делай сам через инструмент.
+- Только инструменты и параметры из списка TOOLS, ничего не выдумывай.
+- После результата инструмента — одна короткая строка о том, что сделано.
+- Инструмент не нужен — отвечай обычным текстом, без тегов.
 
-Примеры правильных ответов:
+Пример:
 Запрос: "создай файл test.txt"
-Ответ: {"name": "file_write", "arguments": {"file_path": "test.txt", "content": ""}}
-
-Запрос: "выполни ls"  
-Ответ: {"name": "bash", "arguments": {"command": "ls"}}
-
-Запрос: "создай notebook test.ipynb"
-Ответ: {"name": "notebook_create", "arguments": {"file_path": "test.ipynb"}}
-
-Запрос: "удали cron задачу task_1"
-Ответ: {"name": "cron_delete", "arguments": {"task_id": "task_1"}}
-
-После получения результата инструмента — напиши ОДНУ строку что сделано."""
+Ответ:
+<tool_call>
+{"name": "file_write", "arguments": {"file_path": "test.txt", "content": ""}}
+</tool_call>"""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -485,45 +481,11 @@ def _parse_any_json_tool(text: str) -> list[dict]:
     2. {"name": "name", "arguments": {...}}        ← OpenAI-подобный
     3. ```json {...} ```                           ← в markdown блоке
     """
-    results = []
-
-    # Ищем JSON блоки — в markdown или голые
-    patterns = [
-        r'```json\s*(\{.*?\})\s*```',
-        r'```\s*(\{.*?\})\s*```',
-        r'(\{\s*"(?:tool|name)"\s*:.*?\})',
-    ]
-
-    for pattern in patterns:
-        for match in re.findall(pattern, text, re.DOTALL):
-            try:
-                data = json.loads(match.strip())
-                # Формат 1: {"tool": ..., "params": ...}
-                if "tool" in data and "params" in data:
-                    results.append({
-                        "id": f"call_{len(results)}",
-                        "name": data["tool"],
-                        "input": data.get("params", {}),
-                    })
-                # Формат 2: {"name": ..., "arguments": ...}
-                elif "name" in data and "arguments" in data:
-                    args = data["arguments"]
-                    if isinstance(args, str):
-                        try:
-                            args = json.loads(args)
-                        except Exception:
-                            args = {}
-                    results.append({
-                        "id": f"call_{len(results)}",
-                        "name": data["name"],
-                        "input": args,
-                    })
-            except json.JSONDecodeError:
-                continue
-        if results:
-            break
-
-    return results
+    # Раньше здесь были non-greedy регулярки r'\{.*?\}', которые обрывались
+    # на первой '}' и ломались на любом вызове с вложенным объектом
+    # параметров. Теперь — посимвольный баланс скобок (json_extract.py).
+    from .json_extract import extract_tool_calls
+    return extract_tool_calls(text)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -546,6 +508,7 @@ class HephaestusAgent:
         self.debug = False  # включается через --debug
         self.auto_commit = False  # git автокоммиты
         self.messages: list[LLMMessage] = []
+        self._progress_hook = None  # опциональный колбэк(name, params, result) — см. goal_mode.py
 
         self._init_tools()
         self.session_manager = SessionManager()
@@ -988,7 +951,6 @@ class HephaestusAgent:
             elif tool_name == "skills_learned":
                 if self.skill_learner:
                     return self.skill_learner.list_skills()
-                from .real_tools import ToolResult
                 return ToolResult(success=True, output="SkillLearner не инициализирован")
 
             # === ДИАГРАММЫ (Rich — терминальные) ===
@@ -1049,15 +1011,24 @@ class HephaestusAgent:
 
         return ToolResult(success=False, output="", error=f"Инструмент не найден: {tool_name}")
 
-    def chat(self, user_message: str) -> str:
-        """Отправить сообщение и получить ответ."""
+    def chat(self, user_message: str, max_iterations: int | None = None,
+             force_all_tools: bool = False) -> str:
+        """Отправить сообщение и получить ответ.
+
+        max_iterations / force_all_tools — используются Goal Mode-ом
+        (см. goal_mode.py), который теперь не ведёт свой отдельный
+        статичный планировщик, а просто прогоняет цель через этот же
+        адаптивный цикл с большим бюджетом итераций и полным списком
+        инструментов, вместо жёсткого списка шагов, составленного
+        заранее и не реагирующего на промежуточные результаты.
+        """
         self.messages.append(LLMMessage(role="user", content=user_message))
 
-        tools_schema = self._get_tools_schema(query=user_message)
+        tools_schema = self._get_tools_schema(query="" if force_all_tools else user_message)
         learning_hint = self.learning.get_context_hint()
         context_section = ("\n\n## Контекст из прошлого опыта:\n" + learning_hint) if learning_hint else ""
         dynamic_system = SYSTEM_PROMPT + context_section
-        MAX_ITERATIONS = 50          # защита от бесконечного цикла
+        MAX_ITERATIONS = max_iterations or 50   # защита от бесконечного цикла
         STUCK_THRESHOLD = 3          # одинаковых вызовов подряд = зациклились
         last_tool_signatures: list[str] = []
         lazy_count = 0
@@ -1234,6 +1205,14 @@ class HephaestusAgent:
                                 bash.execute(f"git add -A && git commit -m 'feat: {name} {fp[:50]}' 2>/dev/null || true")
                 else:
                     self.learning.record_failure(name, result.error or "", params)
+
+                # Хук для внешних наблюдателей (Goal Mode и т.д.) — позволяет
+                # смотреть за выполнением этого же цикла, не дублируя его.
+                if getattr(self, "_progress_hook", None):
+                    try:
+                        self._progress_hook(name, params, result)
+                    except Exception:
+                        pass
 
                 tool_results.append(
                     f"[{call_id}] {name}: {'OK' if result.success else 'ERROR'}\n"

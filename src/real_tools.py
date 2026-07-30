@@ -32,10 +32,25 @@ class BashTool:
         self.max_output_size = max_output_size
         self.workspace_root = Path(workspace_root).resolve() if workspace_root else None
         self.validator = CommandValidator()
+        from .security import SecurityValidator
+        self.security = SecurityValidator()
 
     def execute(self, command: str, cwd: str | None = None) -> ToolResult:
         """Выполнить shell команду."""
         try:
+            # Безусловный барьер: необратимые системные катастрофы (rm -rf /,
+            # mkfs, dd на диск, fork bomb...) блокируются здесь всегда,
+            # до всего остального — не важно, кто вызвал команду: человек
+            # в REPL, Telegram, голосовой ввод или сама модель.
+            catastrophic = self.security.check_catastrophic(command)
+            if catastrophic:
+                return ToolResult(
+                    success=False,
+                    output="",
+                    error=f"🛑 Команда заблокирована: {catastrophic}. "
+                          f"Если это действительно нужно — выполни вручную в терминале, не через агента.",
+                )
+
             # Если cwd не указан, используем workspace_root
             if cwd is None and self.workspace_root:
                 cwd = str(self.workspace_root)
@@ -59,6 +74,10 @@ class BashTool:
             result = subprocess.run(
                 command,
                 shell=True,
+                executable="/bin/bash",  # без этого shell=True на Debian/Ubuntu
+                                          # берёт /bin/sh (dash), где нет source,
+                                          # [[ ]], массивов и т.д. — модель их
+                                          # пишет постоянно, команды тихо падали
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,

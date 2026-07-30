@@ -68,30 +68,33 @@ class LLMClient(ABC):
         pass
 
     def _build_tools_prompt(self, tools: list[dict]) -> str:
-        """Строим JSON Schema описание инструментов для промпта."""
+        """Строим описание инструментов для промпта.
+
+        Формат — Hermes-style <tool_call>{...}</tool_call>: короткий,
+        однозначный, без вариаций ключей. Раньше здесь был СВОЙ формат
+        ("tool"/"params"), отличный от формата в SYSTEM_PROMPT
+        ("name"/"arguments") — они склеивались в один system-промпт и
+        модель получала два противоречащих друг другу примера формата
+        одновременно. Плюс тут не закрывался ```json блок перед списком
+        инструментов, из-за чего пример вызова визуально сливался со
+        схемой всех инструментов. Оба момента исправлены.
+        """
         tools_json = json.dumps(tools, ensure_ascii=False, indent=2)
-        return f"""You have access to the following tools. To use a tool, respond with a JSON object in this exact format:
+        return f"""You have access to tools. To call one, output ONLY this, nothing else:
 
-```json
-{{
-  "tool": "tool_name",
-  "params": {{
-    "param1": "value1",
-    "param2": "value2"
-  }}
-}}
+<tool_call>
+{{"name": "tool_name", "arguments": {{"param1": "value1"}}}}
+</tool_call>
+
+Rules:
+- Exactly one <tool_call> block, valid JSON inside it, no text before/after.
+- Use only tools and parameter names listed below.
+- If no tool is needed, answer normally in plain text (no <tool_call>).
+
 Available tools:
+```json
 {tools_json}
-
-IMPORTANT:
-
-Respond with ONLY the JSON object if you want to use a tool
-
-No extra text before or after the JSON when calling a tool
-
-Use the exact parameter names from the schema
-
-If you don't need a tool, just respond normally in text"""
+```"""
 
     def _parse_json_tool_call(self, text: str) -> list[dict]:
         """Парсим JSON tool call из ответа модели."""
@@ -123,66 +126,15 @@ If you don't need a tool, just respond normally in text"""
         return tool_use_blocks
 
     def _extract_tool_calls(self, text: str) -> list[dict]:
-        """Извлекаем tool calls из текста модели в любом формате."""
-        results = []
-        seen = set()
+        """Извлекаем tool calls из текста модели в любом формате.
 
-        candidates = []
-        for pattern in [r'json\s*(\{.*?\})\s*', r'\s*(\{.*?\})\s*']:
-            candidates += re.findall(pattern, text, re.DOTALL)
-        for m in re.finditer(r'{[^{}](?:{[^{}]}[^{}])}', text, re.DOTALL):
-            candidates.append(m.group())
-
-        for raw in candidates:
-            try:
-                data = json.loads(raw.strip())
-            except (json.JSONDecodeError, ValueError):
-                continue
-
-            name = None
-            args = {}
-
-            if "name" in data and "arguments" in data:
-                name = data["name"]
-                args = data["arguments"]
-                if isinstance(args, str):
-                    try:
-                        args = json.loads(args)
-                    except Exception:
-                        args = {}
-
-            elif "name" in data and "parameters" in data:
-                name = data["name"]
-                args = data["parameters"]
-
-            elif "tool" in data and "params" in data:
-                name = data["tool"]
-                args = data.get("params", {})
-
-            elif "tool" in data and "arguments" in data:
-                name = data["tool"]
-                args = data["arguments"]
-                if isinstance(args, str):
-                    try:
-                        args = json.loads(args)
-                    except Exception:
-                        args = {}
-
-            if not name or not isinstance(args, dict):
-                continue
-
-            sig = f"{name}:{json.dumps(args, sort_keys=True)}"
-            if sig in seen:
-                continue
-            seen.add(sig)
-
-            results.append({
-                "id": f"extracted_{len(results)}",
-                "name": name,
-                "input": args,
-            })
-
-        return results
+        Раньше здесь были non-greedy регулярки вида r'\\{.*?\\}', которые
+        обрывались на первой встреченной '}' и потому ломались на любом
+        вызове с вложенным объектом параметров (path+content и т.п.).
+        Теперь используется посимвольный баланс скобок — см. json_extract.py.
+        """
+        from .json_extract import extract_tool_calls
+        return extract_tool_calls(text)
 
     def _fallback_tool_calling(
         self,

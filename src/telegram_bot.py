@@ -157,8 +157,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Гефест Telegram Bot")
     parser.add_argument("--token", help="Telegram Bot Token")
     parser.add_argument("--save-token", help="Сохранить токен")
-    parser.add_argument("--provider", default="ollama")
-    parser.add_argument("--model", default="qwen2.5-coder:7b-instruct-q4_K_M")
+    parser.add_argument("--provider", choices=[
+        "ollama", "openai", "anthropic", "openrouter",
+        "koboldcpp", "llama_server", "custom",
+    ])
+    parser.add_argument("--model", help="Название модели")
+    parser.add_argument("--base-url", help="Базовый URL (Ollama/llama_server/KoboldCPP/Custom)")
+    parser.add_argument("--api-key", help="API ключ (OpenAI/Anthropic/OpenRouter/Custom)")
+    parser.add_argument("--workspace", help="Рабочая папка агента")
+    parser.add_argument("--temperature", type=float, default=0.1)
     args = parser.parse_args()
 
     if args.save_token:
@@ -172,14 +179,48 @@ if __name__ == "__main__":
         sys.exit(1)
 
     from src.hephaestus import HephaestusAgent
-    from src.llm_client import LLMConfig, LLMProvider
+    from src.llm_client import LLMConfig, LLMProvider, auto_detect_provider
+
+    # Тот же принцип выбора провайдера, что и в hephaestus.py:
+    # если --provider не передан явно — автоопределение (env/доступные сервера),
+    # а не жёсткая заглушка на ollama.
+    if args.provider:
+        provider = LLMProvider(args.provider)
+        default_models = {
+            "ollama": os.getenv("OLLAMA_MODEL", "llama3.2:3b"),
+            "openai": "gpt-4o",
+            "anthropic": "claude-sonnet-4-6",
+            "openrouter": os.getenv("OPENROUTER_MODEL", "qwen/qwen-2.5-coder-32b-instruct"),
+            "koboldcpp": "local-model",
+        }
+        model = args.model or default_models.get(args.provider, "default")
+    else:
+        provider, model = auto_detect_provider()
+        if args.model:
+            model = args.model
+
+    # base_url: явный аргумент > переменные окружения под конкретный провайдер > None
+    # (раньше здесь всегда подставлялся OLLAMA_HOST, даже для custom/openai/anthropic —
+    # то есть бот физически не мог обратиться ни к чему кроме Ollama-совместимого сервера).
+    base_url = args.base_url
+    if not base_url:
+        if provider == LLMProvider.OLLAMA:
+            base_url = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+        elif provider == LLMProvider.LLAMA_SERVER:
+            base_url = os.getenv("LLAMA_SERVER_URL", "http://127.0.0.1:8080")
+        elif provider == LLMProvider.CUSTOM:
+            base_url = os.getenv("CUSTOM_BASE_URL")
+        elif provider == LLMProvider.KOBOLDCPP:
+            base_url = os.getenv("KOBOLDCPP_URL")
 
     config = LLMConfig(
-        provider=LLMProvider(args.provider),
-        model=args.model,
-        base_url=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
+        provider=provider,
+        model=model,
+        api_key=args.api_key or os.getenv("LLM_API_KEY"),
+        base_url=base_url,
+        temperature=args.temperature,
     )
-    agent = HephaestusAgent(llm_config=config)
+    agent = HephaestusAgent(llm_config=config, workspace_root=args.workspace)
 
     bot = HephaestusTelegramBot(token=token, agent=agent)
     bot.run()

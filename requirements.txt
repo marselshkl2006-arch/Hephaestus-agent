@@ -35,3 +35,16 @@ trafilatura>=1.6.0           # Лучший парсер текста из HTML 
 
 # ─── Telegram_bot ──────────────────────────────────────────
 python-telegram-bot>=20.0    # Telegram бот
+
+# ─── Voice (voice_interface.py) — опционально ─────────
+# Нужны только если запускаешь голосовой режим.
+# faster-whisper тянет ctranslate2 — модель скачается сама
+# при первом запуске (~500MB для 'small', кешируется).
+sounddevice>=0.4.6           # Запись с микрофона
+faster-whisper>=1.0.0        # Offline распознавание речи (STT)
+# TTS: используется системный `piper` (если установлен и указан
+# --piper-model) либо `espeak-ng` как offline fallback без
+# дополнительных pip-пакетов — оба ставятся через apt, не pip:
+#   sudo apt install espeak-ng          # fallback, работает из коробки
+#   # piper — по желанию, для более естественного голоса:
+#   # https://github.com/rhasspy/piper (бинарник + .onnx модель голоса)
