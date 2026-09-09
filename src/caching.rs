@@ -420,6 +420,7 @@ mod tests {
 
     #[test]
     fn test_cache_expiration() {
+        use std::time::Duration;
         let mut cache = Cache::with_defaults();
         cache.set("key1", Value::String("value1".to_string()), Some(1));
         std::thread::sleep(Duration::from_secs(2));

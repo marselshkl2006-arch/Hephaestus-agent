@@ -175,7 +175,8 @@ mod tests {
 
     #[test]
     fn sanitize_handles_weird_ids() {
-        let mut map = HashMap::new();
+        use std::collections::HashMap;
+        let mut map: HashMap<String, &str> = HashMap::new();
         map.insert("a/b c".to_string(), "a_b_c");
         for (raw, clean) in map {
             assert_eq!(sanitize_file_stem(&raw), clean);
