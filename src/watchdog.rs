@@ -18,7 +18,7 @@
 //! тоже мертвы, потому что стоят в той же заблокированной очереди).
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Порог тишины: 15 минут без единого heartbeat = зависание.
 const IDLE_LIMIT: Duration = Duration::from_secs(15 * 60);

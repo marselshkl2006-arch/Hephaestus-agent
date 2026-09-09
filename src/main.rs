@@ -352,7 +352,7 @@ impl Agent {
     /// subagent::spawn через crate::build_sub_agent.
     pub fn build_sub_agent(runner: &Arc<tools::subagent::SubAgentRunner>) -> Self {
         let monitoring = Arc::new(monitoring::MonitoringSystem::new());
-        let mut sub_session;
+        let sub_session;
         Self {
             llm: create_llm_client(runner.cfg.clone()),
             tools: runner.registry.get().cloned().expect("реестр привязан при старте"),
@@ -540,7 +540,7 @@ impl Agent {
             // один инструмент, сколько бы их ни было зарегистрировано в
             // self.tools — не баг конкретного инструмента, а разрыв во
             // всей цепочке. См. ToolRegistry::to_api_schemas в tools/mod.rs.
-            let mut tool_schemas_holder = self.tools.to_api_schemas();
+            let tool_schemas_holder = self.tools.to_api_schemas();
             // learning.rs (итерация 7): если по прошлому опыту сессии
             // какой-то инструмент часто падает или известны предпочтения
             // пользователя — подмешиваем это системным подсказом. Пусто,
