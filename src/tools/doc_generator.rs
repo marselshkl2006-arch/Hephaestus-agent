@@ -862,6 +862,372 @@ pre{{background:#f4f4f4;padding:.7rem;overflow:auto}}</style></head><body>{}</bo
     std::fs::write(path, html).map_err(|e| e.to_string())
 }
 
+// ──────────────────────────────────────────────────────────── PPTX ──
+
+/// Слайд презентации: заголовок + строки контента (без инлайн-разметки —
+/// PPTX-текст рендерим простыми параграфами, буллеты как "• ").
+struct Slide {
+    title: String,
+    lines: Vec<String>,
+}
+
+/// ParsedDoc → слайды. Правила (markdown-презентации как в Marp):
+/// первый `# ` — титульный слайд; каждый `## ` — заголовок нового слайда;
+/// буллеты/абзацы/код/таблицы — контент текущего слайда; `### ` — строка
+/// подзаголовка. Если H1/H2 нет вообще — один слайд со всем содержимым.
+fn doc_to_slides(doc: &ParsedDoc) -> Vec<Slide> {
+    let mut slides: Vec<Slide> = Vec::new();
+    let mut cur: Option<Slide> = None;
+    let mut title_used = false;
+
+    fn flush(cur: &mut Option<Slide>, slides: &mut Vec<Slide>) {
+        if let Some(s) = cur.take() {
+            slides.push(s);
+        }
+    }
+    fn push_line(cur: &mut Option<Slide>, slides: &mut Vec<Slide>, line: String) {
+        if line.trim().is_empty() {
+            return;
+        }
+        if cur.is_none() {
+            *cur = Some(Slide { title: String::new(), lines: Vec::new() });
+        }
+        if let Some(s) = cur.as_mut() {
+            s.lines.push(line);
+        }
+        let _ = slides;
+    }
+
+    for b in &doc.blocks {
+        match b {
+            DocBlock::H(1, t) => {
+                // Первый H1 — титульный слайд (подзаголовки после него
+                // попадают в его же контент, до первого H2).
+                flush(&mut cur, &mut slides);
+                cur = Some(Slide { title: t.clone(), lines: Vec::new() });
+                if !title_used {
+                    title_used = true;
+                }
+            }
+            DocBlock::H(2, t) => {
+                flush(&mut cur, &mut slides);
+                cur = Some(Slide { title: t.clone(), lines: Vec::new() });
+            }
+            DocBlock::H(3, t) => push_line(&mut cur, &mut slides, format!("▸ {}", t)),
+            DocBlock::Para(t) => push_line(&mut cur, &mut slides, t.clone()),
+            DocBlock::Bullets(items) => {
+                for it in items {
+                    push_line(&mut cur, &mut slides, format!("• {}", it));
+                }
+            }
+            DocBlock::Code(c) => {
+                for l in c.lines() {
+                    push_line(&mut cur, &mut slides, l.to_string());
+                }
+            }
+            DocBlock::Table { headers, rows } => {
+                push_line(&mut cur, &mut slides, headers.join(" | "));
+                for r in rows {
+                    push_line(&mut cur, &mut slides, r.join(" | "));
+                }
+            }
+            DocBlock::H(_, t) => push_line(&mut cur, &mut slides, format!("▸ {}", t)),
+        }
+    }
+    flush(&mut cur, &mut slides);
+
+    if slides.is_empty() {
+        // Ни H1, ни H2 — всё в один слайд с заголовком документа.
+        let mut s = Slide { title: doc.title.clone(), lines: Vec::new() };
+        for b in &doc.blocks {
+            match b {
+                DocBlock::Para(t) => s.lines.push(t.clone()),
+                DocBlock::Bullets(items) => {
+                    for it in items {
+                        s.lines.push(format!("• {}", it));
+                    }
+                }
+                _ => {}
+            }
+        }
+        slides.push(s);
+    }
+    slides
+}
+
+/// Минимальный ВАЛИДНЫЙ PPTX (открывается PowerPoint и LibreOffice):
+/// OOXML-презентация = ZIP с [Content_Types].xml, presentation.xml,
+/// slideMaster, slideLayout, theme и слайдами. Ничего внешнего не нужно —
+/// тот же принцип, что у write_docx.
+fn write_pptx(path: &std::path::Path, doc: &ParsedDoc) -> Result<(), String> {
+    use xml_escape as esc;
+
+    let slides = doc_to_slides(doc);
+    let n = slides.len();
+    if n == 0 {
+        return Err("нет контента для слайдов".into());
+    }
+
+    // ── слайды ──
+    let mut slide_parts: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut sld_id_list = String::new();
+    let mut pres_rels = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster\" Target=\"slideMasters/slideMaster1.xml\"/>",
+    );
+    let mut content_overrides = String::new();
+
+    for (i, s) in slides.iter().enumerate() {
+        let idx = i + 1;
+        sld_id_list.push_str(&format!(
+            "<p:sldId id=\"{}\" r:id=\"rId{}\"/>",
+            256 + i,
+            idx + 1
+        ));
+        pres_rels.push_str(&format!(
+            "<Relationship Id=\"rId{}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide\" Target=\"slides/slide{}.xml\"/>",
+            idx + 1,
+            idx
+        ));
+        content_overrides.push_str(&format!(
+            "<Override PartName=\"/ppt/slides/slide{}.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slide+xml\"/>",
+            idx
+        ));
+
+        // Титульный слайд (i == 0 и заголовок есть, контента нет) — крупный
+        // текст по центру; остальные — заголовок сверху + контент.
+        let is_title_only = i == 0 && s.lines.is_empty();
+        let (t_off_y, t_size, t_bold) = if is_title_only {
+            (2400300i64, 5400, true)
+        } else {
+            (365125i64, 3200, true)
+        };
+        let body_sp = if is_title_only {
+            // Подзаголовок титульного — из doc.title не берём; пусто.
+            String::new()
+        } else {
+            let mut paras = String::new();
+            for line in &s.lines {
+                paras.push_str(&format!(
+                    "<a:p><a:pPr marL=\"0\" indent=\"0\"/><a:r><a:rPr lang=\"ru-RU\" sz=\"1800\"/>\
+<a:t>{}</a:t></a:r></a:p>",
+                    esc(line)
+                ));
+            }
+            format!(
+                "<p:sp><p:nvSpPr><p:cNvPr id=\"3\" name=\"Content\"/><p:cNvSpPr><a:spLocks noGrp=\"1\"/></p:cNvSpPr><p:nvPr/></p:nvSpPr>\
+<p:spPr><a:xfrm><a:off x=\"838200\" y=\"1825625\"/><a:ext cx=\"10515600\" cy=\"4572000\"/></a:xfrm></p:spPr>\
+<p:txBody><a:bodyPr/><a:lstStyle/>{paras}</p:txBody></p:sp>"
+            )
+        };
+        let slide_xml = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+<p:sld xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" \
+xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" \
+xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\">\
+<p:cSld><p:spTree>\
+<p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>\
+<p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"Title\"/><p:cNvSpPr><a:spLocks noGrp=\"1\"/></p:cNvSpPr><p:nvPr/></p:nvSpPr>\
+<p:spPr><a:xfrm><a:off x=\"838200\" y=\"{t_off_y}\"/><a:ext cx=\"10515600\" cy=\"1325563\"/></a:xfrm></p:spPr>\
+<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang=\"ru-RU\" sz=\"{t_size}\" b=\"{t_bold}\"/><a:t>{}</a:t></a:r></a:p></p:txBody></p:sp>\
+{body_sp}\
+</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>",
+            esc(&s.title)
+        );
+
+        let slide_rels = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout\" Target=\"../slideLayouts/slideLayout1.xml\"/>\
+</Relationships>"
+        );
+        slide_parts.push((format!("ppt/slides/slide{}.xml", idx), slide_xml.into_bytes()));
+        slide_parts.push((
+            format!("ppt/slides/_rels/slide{}.xml.rels", idx),
+            slide_rels.into_bytes(),
+        ));
+    }
+    pres_rels.push_str("</Relationships>");
+
+    let content_types = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">\
+<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>\
+<Default Extension=\"xml\" ContentType=\"application/xml\"/>\
+<Override PartName=\"/ppt/presentation.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml\"/>\
+<Override PartName=\"/ppt/slideMasters/slideMaster1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml\"/>\
+<Override PartName=\"/ppt/slideLayouts/slideLayout1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml\"/>\
+<Override PartName=\"/ppt/theme/theme1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.theme+xml\"/>\
+{content_overrides}\
+</Types>"
+    );
+
+    let presentation_xml = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+<p:presentation xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" \
+xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" \
+xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\">\
+<p:sldMasterIdLst><p:sldMasterId id=\"2147483648\" r:id=\"rId1\"/></p:sldMasterIdLst>\
+<p:sldIdLst>{sld_id_list}</p:sldIdLst>\
+<p:sldSz cx=\"12192000\" cy=\"6858000\"/><p:notesSz cx=\"6858000\" cy=\"9144000\"/></p:presentation>"
+    );
+
+    // Тема: clrScheme/fontScheme/fmtScheme обязательны (fmtScheme — минимум
+    // по 3 стиля в каждом списке, иначе PowerPoint считает файл битым).
+    let theme_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Hephaestus">
+<a:themeElements>
+<a:clrScheme name="Hephaestus"><a:dk1><a:srgbClr val="1F1F1F"/></a:dk1><a:lt1><a:srgbClr val="FFFFFF"/></a:lt1>
+<a:dk2><a:srgbClr val="44546A"/></a:dk2><a:lt2><a:srgbClr val="E7E6E6"/></a:lt2>
+<a:accent1><a:srgbClr val="C0504D"/></a:accent1><a:accent2><a:srgbClr val="E8A33D"/></a:accent2>
+<a:accent3><a:srgbClr val="4472C4"/></a:accent3><a:accent4><a:srgbClr val="70AD47"/></a:accent4>
+<a:accent5><a:srgbClr val="5B9BD5"/></a:accent5><a:accent6><a:srgbClr val="7030A0"/></a:accent6>
+<a:hlink><a:srgbClr val="0563C1"/></a:hlink><a:folHlink><a:srgbClr val="954F72"/></a:folHlink></a:clrScheme>
+<a:fontScheme name="Hephaestus"><a:majorFont><a:latin typeface="Calibri Light"/><a:ea typeface=""/><a:cs typeface=""/></a:majorFont>
+<a:minorFont><a:latin typeface="Calibri"/><a:ea typeface=""/><a:cs typeface=""/></a:minorFont></a:fontScheme>
+<a:fmtScheme name="Hephaestus">
+<a:fillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+<a:solidFill><a:schemeClr val="phClr"><a:tint val="60000"/></a:schemeClr></a:solidFill>
+<a:solidFill><a:schemeClr val="phClr"><a:shade val="80000"/></a:schemeClr></a:solidFill></a:fillStyleLst>
+<a:lnStyleLst><a:ln w="6350"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln>
+<a:ln w="12700"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln>
+<a:ln w="19050"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln></a:lnStyleLst>
+<a:effectStyleLst><a:effectStyle><a:effectLst/></a:effectStyle>
+<a:effectStyle><a:effectLst/></a:effectStyle>
+<a:effectStyle><a:effectLst><a:outerShdw blurRad="40000" dist="23000" dir="5400000" algn="tl"><a:srgbClr val="000000"><a:alpha val="35000"/></a:srgbClr></a:outerShdw></a:effectLst></a:effectStyle></a:effectStyleLst>
+<a:bgFillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+<a:solidFill><a:schemeClr val="phClr"><a:tint val="95000"/></a:schemeClr></a:solidFill>
+<a:solidFill><a:schemeClr val="phClr"><a:shade val="90000"/></a:schemeClr></a:solidFill></a:bgFillStyleLst>
+</a:fmtScheme></a:themeElements></a:theme>"#;
+
+    let master_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldMaster xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+<p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/></p:spTree></p:cSld>
+<p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>
+<p:sldLayoutIdLst><p:sldLayoutId id="2147483649" r:id="rId1"/></p:sldLayoutIdLst>
+</p:sldMaster>"#;
+
+    let master_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
+<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="../theme/theme1.xml"/>
+</Relationships>"#;
+
+    let layout_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldLayout xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" type="blank" preserve="1">
+<p:cSld name="Blank"><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/></p:spTree></p:cSld>
+<p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sldLayout>"#;
+
+    let layout_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="../slideMasters/slideMaster1.xml"/>
+</Relationships>"#;
+
+    let root_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/>
+</Relationships>"#;
+
+    let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
+    let mut z = zip::ZipWriter::new(file);
+    let opts = zip::write::SimpleFileOptions::default();
+    let mut parts: Vec<(String, Vec<u8>)> = vec![
+        ("[Content_Types].xml".into(), content_types.into_bytes()),
+        ("_rels/.rels".into(), root_rels.as_bytes().to_vec()),
+        ("ppt/presentation.xml".into(), presentation_xml.into_bytes()),
+        ("ppt/_rels/presentation.xml.rels".into(), pres_rels.into_bytes()),
+        ("ppt/slideMasters/slideMaster1.xml".into(), master_xml.as_bytes().to_vec()),
+        ("ppt/slideMasters/_rels/slideMaster1.xml.rels".into(), master_rels.as_bytes().to_vec()),
+        ("ppt/slideLayouts/slideLayout1.xml".into(), layout_xml.as_bytes().to_vec()),
+        ("ppt/slideLayouts/_rels/slideLayout1.xml.rels".into(), layout_rels.as_bytes().to_vec()),
+        ("ppt/theme/theme1.xml".into(), theme_xml.as_bytes().to_vec()),
+    ];
+    parts.extend(slide_parts);
+    for (name, data) in parts {
+        z.start_file(name, opts).map_err(|e| e.to_string())?;
+        z.write_all(&data).map_err(|e| e.to_string())?;
+    }
+    z.finish().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// ───────────────────────────────────────────────────────────── RTF ──
+
+/// RTF-эскейп: ASCII как есть (с \{ \} \\), не-ASCII (кириллица!) —
+/// юникод-эскейпы \uN? (signed 16-bit; всё выше 32767 заменяем '?').
+fn rtf_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 2);
+    for c in s.chars() {
+        let cp = c as u32;
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '{' => out.push_str("\\{"),
+            '}' => out.push_str("\\}"),
+            '\n' => out.push_str("\\line "),
+            _ if cp < 128 => out.push(c),
+            _ if cp <= 32767 => out.push_str(&format!("\\u{}?", cp as i16)),
+            _ => out.push('?'),
+        }
+    }
+    out
+}
+
+/// RTF-документ: открывается Word, LibreOffice, Google Docs — универсальный
+/// текстовый формат без XML и ZIP (одна строка escape-последовательностей).
+fn write_rtf(path: &std::path::Path, doc: &ParsedDoc) -> Result<(), String> {
+    let mut body = String::new();
+    for b in &doc.blocks {
+        match b {
+            DocBlock::H(1, t) => body.push_str(&format!("\\fs40\\b {}\\b0\\fs22\\par\n", rtf_escape(t))),
+            DocBlock::H(2, t) => body.push_str(&format!("\\fs32\\b {}\\b0\\fs22\\par\n", rtf_escape(t))),
+            DocBlock::H(3, t) => body.push_str(&format!("\\fs26\\b {}\\b0\\fs22\\par\n", rtf_escape(t))),
+            DocBlock::H(_, t) => body.push_str(&format!("\\fs26\\b {}\\b0\\fs22\\par\n", rtf_escape(t))),
+            DocBlock::Para(t) => body.push_str(&format!("{}\\par\n", rtf_escape(t))),
+            DocBlock::Bullets(items) => {
+                for it in items {
+                    body.push_str(&format!("\\bullet  {}\\par\n", rtf_escape(it)));
+                }
+            }
+            DocBlock::Code(c) => {
+                body.push_str("\\f1\\fs20 ");
+                for l in c.lines() {
+                    body.push_str(&format!("{}\\line\n", rtf_escape(l)));
+                }
+                body.push_str("\\f0\\fs22\\par\n");
+            }
+            DocBlock::Table { headers, rows } => {
+                let cols = headers.len().max(1);
+                // Ширина колонок: равные, по 2000 twips на колонку.
+                let mut rowdef = String::from("\\trowd\\trgaph108");
+                for i in 1..=cols {
+                    rowdef.push_str(&format!("\\cellx{}", 2000 * i));
+                }
+                let cell = |t: &str, bold: bool| {
+                    format!("\\intbl {}{}\\cell ", if bold { "\\b " } else { "" }, rtf_escape(t))
+                };
+                body.push_str(&rowdef);
+                for h in headers {
+                    body.push_str(&cell(h, true));
+                }
+                body.push_str("\\row\n");
+                for r in rows {
+                    body.push_str(&rowdef);
+                    for c in r {
+                        body.push_str(&cell(c, false));
+                    }
+                    body.push_str("\\row\n");
+                }
+                body.push_str("\\par\n");
+            }
+        }
+    }
+    let rtf = format!(
+        "{{\\rtf1\\ansi\\deff0\\uc1\n{{\\fonttbl{{\\f0 Arial;}}{{\\f1 Consolas;}}}}\n\\f0\\fs22 {body}\n}}",
+    );
+    std::fs::write(path, rtf).map_err(|e| e.to_string())
+}
+
 fn write_csv(path: &std::path::Path, doc: &ParsedDoc) -> Result<(), String> {
     let table = doc.blocks.iter().find_map(|b| match b {
         DocBlock::Table { headers, rows } => Some((headers, rows)),
@@ -907,10 +1273,10 @@ impl Tool for DocumentCreateTool {
             .and_then(|p| p.as_str())
             .unwrap_or("document");
         let ext = match fmt.as_str() {
-            "docx" | "odt" | "xlsx" | "csv" | "html" | "md" => fmt.as_str(),
+            "docx" | "odt" | "xlsx" | "csv" | "html" | "md" | "pptx" | "rtf" => fmt.as_str(),
             other => {
                 return ToolResult::error(format!(
-                    "неизвестный формат '{other}'. Доступно: docx, odt, xlsx, csv, html, md"
+                    "неизвестный формат '{other}'. Доступно: docx, odt, xlsx, csv, html, md, pptx (презентация), rtf"
                 ))
             }
         };
@@ -958,6 +1324,8 @@ impl Tool for DocumentCreateTool {
             "xlsx" => write_xlsx(&path, &doc),
             "csv" => write_csv(&path, &doc),
             "html" => write_html(&path, &doc),
+            "pptx" => write_pptx(&path, &doc),
+            "rtf" => write_rtf(&path, &doc),
             "md" => std::fs::write(&path, markdown).map_err(|e| e.to_string()),
             _ => unreachable!(),
         };
@@ -976,16 +1344,16 @@ impl Tool for DocumentCreateTool {
     }
 
     fn description(&self) -> &'static str {
-        "Создать ДОКУМЕНТ в формате Word (docx), LibreOffice (odt), Excel (xlsx), csv, html или md. Опишите содержимое параметром 'markdown': # заголовки, абзацы, '- ' списки, ```код```, таблицы вида |колонка|колонка| с разделителем |---|---|. Укажите 'path' (например reports/report.docx) и 'format'."
+        "Создать ДОКУМЕНТ или ПРЕЗЕНТАЦИЮ. Форматы: docx (Word), odt (LibreOffice), xlsx (Excel, таблицы становятся листами), csv, html, md, pptx (PowerPoint-презентация: первый '# ' — титульный слайд, каждый '## ' — новый слайд, '- ' списки и таблицы — контент слайда), rtf (универсальный текст). Содержимое параметром 'markdown': # заголовки, абзацы, '- ' списки, ```код```, таблицы |колонка|колонка| с разделителем |---|---|. Параметры 'path' (например reports/report.docx) и 'format'."
     }
 
     fn parameters_schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "markdown": {"type": "string", "description": "Содержимое в Markdown"},
+                "markdown": {"type": "string", "description": "Содержимое в Markdown; для pptx каждый '## ' начинает новый слайд"},
                 "title": {"type": "string", "description": "Заголовок документа (для template=report, если нет # в markdown)"},
-                "format": {"type": "string", "enum": ["docx", "odt", "xlsx", "csv", "html", "md"], "description": "Формат файла, по умолчанию docx"},
+                "format": {"type": "string", "enum": ["docx", "odt", "xlsx", "csv", "html", "md", "pptx", "rtf"], "description": "Формат файла, по умолчанию docx; pptx — презентация"},
                 "path": {"type": "string", "description": "Путь сохранения (относительный или абсолютный)"},
                 "template": {"type": "string", "enum": ["none", "report"], "description": "report — структура отчёта: титул, дата, секции Краткое резюме/Детали/Результаты"}
             },
@@ -1107,6 +1475,67 @@ mod docgen_tests {
             let doc_xml = unzip_entry(std::path::Path::new(&out), "word/document.xml");
             assert!(doc_xml.contains("</w:tblGrid>"));
         });
+    }
+
+    #[test]
+    fn test_pptx_structure() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let md = "# Титульный\n\n## Слайд раз\n\n- пункт один\n- пункт два\n\n## Слайд два\n\nТекст слайда.\n\n| A | B |\n|---|---|\n| 1 | 2 |";
+        let p = dir.path().join("t.pptx");
+        write_pptx(&p, &parse_markdown_doc(md)).unwrap();
+
+        // Обязательные части минимального PPTX.
+        let ct = unzip_entry(&p, "[Content_Types].xml");
+        assert!(ct.contains("presentationml.presentation.main+xml"));
+        assert!(ct.contains("/ppt/slides/slide3.xml")); // титульный + 2 контентных
+        let pres = unzip_entry(&p, "ppt/presentation.xml");
+        assert_eq!(pres.matches("<p:sldId ").count(), 3);
+        assert!(pres.contains("sldSz"));
+        let rels = unzip_entry(&p, "ppt/_rels/presentation.xml.rels");
+        assert!(rels.contains("slideMaster1.xml"));
+        let s1 = unzip_entry(&p, "ppt/slides/slide1.xml");
+        assert!(s1.contains("Титульный"));
+        let s2 = unzip_entry(&p, "ppt/slides/slide2.xml");
+        assert!(s2.contains("пункт один"));
+        assert!(s2.contains("Слайд раз"));
+        let s3 = unzip_entry(&p, "ppt/slides/slide3.xml");
+        assert!(s3.contains("A | B"));
+        // Мастер/лейаут/тема на месте и связаны.
+        assert!(unzip_entry(&p, "ppt/slideMasters/slideMaster1.xml").contains("sldLayoutIdLst"));
+        assert!(unzip_entry(&p, "ppt/slideLayouts/slideLayout1.xml").contains("masterClrMapping"));
+        assert!(unzip_entry(&p, "ppt/theme/theme1.xml").contains("fmtScheme"));
+    }
+
+    #[test]
+    fn test_doc_to_slides_rules() {
+        let doc = parse_markdown_doc("# Титул\n\nПодзаголовок титула.\n\n## Один\n\n- a\n- b\n\n## Два\n\nТекст.");
+        let slides = doc_to_slides(&doc);
+        assert_eq!(slides.len(), 3);
+        assert_eq!(slides[0].title, "Титул");
+        // Контент после титульного H1 — строки титульного слайда.
+        assert_eq!(slides[0].lines.len(), 1);
+        assert_eq!(slides[1].title, "Один");
+        assert_eq!(slides[1].lines.len(), 2);
+        assert_eq!(slides[2].title, "Два");
+        // Без заголовков вообще — один слайд с содержимым.
+        let flat = parse_markdown_doc("Просто текст.\n\n- пункт");
+        let s2 = doc_to_slides(&flat);
+        assert_eq!(s2.len(), 1);
+        assert_eq!(s2[0].lines.len(), 2);
+    }
+
+    #[test]
+    fn test_rtf_output() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path().join("t.rtf");
+        write_rtf(&p, &parse_markdown_doc(&sample_md())).unwrap();
+        let rtf = std::fs::read_to_string(&p).unwrap();
+        assert!(rtf.starts_with("{\\rtf1"));
+        // «О» из «Отчёт» = U+041E (1054).
+        assert!(rtf.contains("\\u1054?"));
+        assert!(rtf.contains("\\trowd")); // таблица есть
+        assert!(rtf.contains("\\bullet"));
+        assert!(rtf.trim_end().ends_with('}'));
     }
 }
 
