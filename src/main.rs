@@ -58,6 +58,7 @@ mod learning;
  mod system_prompt;
  mod state_db;
  mod tool_guard;
+ mod watchdog;
 
 // НЕ подключены сознательно (пересмотрено в итерации 7 — caching.rs,
 // task_manager.rs и learning.rs, которые раньше здесь тоже упоминались,
@@ -490,6 +491,10 @@ impl Agent {
 
 
     pub async fn chat(&mut self, user_input: &str, _max_iterations: usize, _auto_approve: bool) -> String {
+        // WATCHDOG: ход начался — живость подтверждена (важно для
+        // suspended-пауз TUI во время sudo/ask_user: тик отрисовки стоит,
+        // но процесс жив).
+        crate::watchdog::bump("chat-start");
         let user_msg = LLMMessage::user(user_input.to_string());
         // ИНКРЕМЕНТАЛЬНАЯ ЗАПИСЬ (state_db.rs): сообщение пользователя
         // попадает в SQLite СРАЗУ — краш в любой момент хода не теряет его.
@@ -623,6 +628,8 @@ impl Agent {
                 let mut consecutive_empty: u32 = 0;
                 loop {
                     attempt += 1;
+                    // WATCHDOG: старт LLM-вызова — веха живости.
+                    crate::watchdog::bump("llm-call-start");
                     let call = if stream_supported {
                         self.llm.complete_with_tools_stream(
                             &messages,
@@ -641,6 +648,7 @@ impl Agent {
                     };
                     match call {
                         Ok(r) => {
+                            crate::watchdog::bump("llm-call-done");
                             // EMPTY-RESPONSE GUARD: пустой контент И без
                             // tool-вызовов — ничто. Один пустой ответ —
                             // случайность (модель грузится), два подряд —
@@ -816,6 +824,10 @@ self.monitoring.record_llm_request(self.llm_provider_name, &self.llm_model_name,
                                 state_db.mark_tool_running(&call_id);
                                 let started = Instant::now();
                                 let result = tools.execute(&name, &input).await;
+                                // WATCHDOG: инструмент завершился — веха живости
+                                // (сам инструмент может не тикать, но ход в
+                                // целом ограничен таймаутом 15 минут).
+                                crate::watchdog::bump("tool-done");
                                 let result = match result {
                                     Some(r) => r,
                                     None => ToolResult::error(format!("Tool not found: {}", name)),
@@ -1265,6 +1277,11 @@ async fn main() {
 
     let mut agent = Agent::new(config, true, workdir);
 
+    // WATCHDOG (watchdog.rs): std::thread-наблюдатель за живостью
+    // рантайма. 15 минут тишины от ВСЕХ тикеров (TUI-отрисовка, Telegram
+    // poll, MCP-watchdog) = зависание процесса → exit(75).
+    watchdog::spawn();
+
     // Ловушка паник: паника в фоновом tokio::spawn-таске (Telegram-бот,
     // воркер очереди) НЕ убивает процесс — она тихо глушит только сам
     // таск. Снаружи это выглядит как "бот просто не отвечает". Теперь
@@ -1364,6 +1381,9 @@ async fn main() {
     }
 
     if args.iter().any(|a| a == "--voice") {
+        // WATCHDOG: в voice-режиме нет тика TUI — живость доказывает
+        // runtime-тикер (простой пользователя на read_line — норма).
+        watchdog::spawn_runtime_ticker();
         let agent = std::sync::Arc::new(tokio::sync::Mutex::new(agent));
         let voice = voice_interface::create_voice_interface(
             agent,
@@ -1378,11 +1398,13 @@ async fn main() {
     }
 
     if args.iter().any(|a| a == "--simple") {
+        watchdog::spawn_runtime_ticker();
         run_simple_loop(agent).await;
         return;
     }
 
     if args.iter().any(|a| a == "--telegram") {
+        watchdog::spawn_runtime_ticker();
         telegram_bot::run_from_env(agent).await;
         return;
     }

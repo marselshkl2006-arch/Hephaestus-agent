@@ -195,6 +195,8 @@ impl TelegramBot {
                     } else {
                         last_shown = None;
                     }
+                    // WATCHDOG: poll-цикл бота — тикер живости.
+                    crate::watchdog::bump("telegram-permission-poll");
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 }
             });
@@ -204,6 +206,9 @@ impl TelegramBot {
         let mut error_streak: u32 = 0;
 
         loop {
+            // WATCHDOG: getUpdates возвращает каждые ~25с (long poll) —
+            // основной тикер живости при включённом боте.
+            crate::watchdog::bump("telegram-getupdates");
             let body = match self
                 .call(
                     "getUpdates",

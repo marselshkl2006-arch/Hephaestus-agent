@@ -884,6 +884,9 @@ impl McpManager {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(60)).await;
+                // WATCHDOG: этот тикер — главный источник heartbeat в
+                // headless-режимах (без TUI), работает всегда.
+                crate::watchdog::bump("mcp-watchdog-tick");
                 let slots = this.slots.lock().map(|s| s.clone()).unwrap_or_default();
                 for slot in slots {
                     if slot.get_conn().is_some() {

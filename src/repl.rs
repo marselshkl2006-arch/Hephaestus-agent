@@ -373,7 +373,14 @@ async fn run_app(
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(120));
 
+    // WATCHDOG: TUI-режим активен — следим за свежестью тика отрисовки.
+    crate::watchdog::set_tui_active(true);
+
     loop {
+        // WATCHDOG: тик основного цикла TUI (каждые ~120мс) — главный
+        // источник heartbeat при активном TUI. Сюда же попадает
+        // suspended-ожидание ниже.
+        crate::watchdog::bump_tui_tick();
         // ИСПРАВЛЕНО (жалоба "bash — опять в кашу"): раньше проверка
         // NEEDS_REDRAW шла ПОСЛЕ старта итерации — но пока терминал
         // передан sudo/ask_user (см. tty_guard.rs), этот цикл как
@@ -870,6 +877,10 @@ async fn run_app(
             }
         }
     }
+
+    // WATCHDOG: TUI больше не активен — глобальные тикеры снова
+    // единственный источник heartbeat.
+    crate::watchdog::set_tui_active(false);
 
     Ok(())
 }
