@@ -55,7 +55,8 @@ mod learning;
  mod mcp;
  mod request_queue;
  mod parser;
-mod system_prompt;
+ mod system_prompt;
+ mod state_db;
 
 // НЕ подключены сознательно (пересмотрено в итерации 7 — caching.rs,
 // task_manager.rs и learning.rs, которые раньше здесь тоже упоминались,
@@ -87,6 +88,84 @@ use llm::{LLMClient, LLMConfig, LLMMessage, ToolUseBlock, create_llm_client};
 use tools::{SharedToolRegistry, ToolResult, ToolsEnv, create_tools};
 
 type ToolHook = Box<dyn Fn(&str, &serde_json::Value, bool, &str) + Send + Sync>;
+
+/// Recovery при старте (по образцу docs/session-lifecycle.md Hermes):
+/// - `clean_shutdown=1` в meta → прошлый выход штатный → НОВАЯ сессия.
+/// - Иначе (краш/kill) → та же последняя сессия, `resume_pending=1`
+///   (снимается после первого успешного хода), заметка для TUI.
+/// - Нет прошлой сессии → новая.
+/// - 3+ крашей подряд (`crash_streak`) → принудительно НОВАЯ сессия
+///   (stuck-loop escalation: возможно, именно контент сессии валит
+///   процесс — начинаем с чистого листа).
+fn recover_session(
+    state: &Arc<state_db::StateDb>,
+    provider: &str,
+    model: &str,
+) -> (state_db::SessionHandle, Option<String>) {
+    let clean = state.meta_get(state_db::meta_keys::CLEAN_SHUTDOWN);
+    let streak: u32 = state
+        .meta_get(state_db::meta_keys::CRASH_STREAK)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+
+    // Изначально считаем запуск потенциально аварийным: clean_shutdown
+    // сбрасываем сразу. При штатном выходе repl вызовет mark_clean_shutdown.
+    state.meta_set(state_db::meta_keys::CLEAN_SHUTDOWN, "0");
+    if clean.as_deref() != Some("1") {
+        let next = streak + 1;
+        state.meta_set(state_db::meta_keys::CRASH_STREAK, &next.to_string());
+    } else {
+        state.meta_set(state_db::meta_keys::CRASH_STREAK, "0");
+    }
+
+    let last = state.last_session_id();
+    let Some(last_id) = last else {
+        // Первый запуск: создаём сессию.
+        let id = state.new_session(provider, model);
+        return (state_db::SessionHandle::new(state.clone(), id), None);
+    };
+
+    let crashed = clean.as_deref() != Some("1");
+    let force_fresh = crashed && streak >= 3;
+
+    if !crashed || force_fresh {
+        if force_fresh {
+            state.set_resume_pending(last_id, false);
+            let id = state.new_session(provider, model);
+            return (
+                state_db::SessionHandle::new(state.clone(), id),
+                Some(format!(
+                    "⚠️ Предыдущая сессия аварийно завершалась {streak} раз(а) подряд — начал новую сессию (старая #{last_id} сохранена в БД)."
+                )),
+            );
+        }
+        let id = state.new_session(provider, model);
+        return (state_db::SessionHandle::new(state.clone(), id), None);
+    }
+
+    // Краш: продолжаем ТУ ЖЕ сессию (тот же id, прежний транскрипт).
+    state.set_resume_pending(last_id, true);
+    let count = state.count_messages(last_id);
+    let when = state
+        .session_updated_at(last_id)
+        .unwrap_or_else(|| "неизвестно когда".to_string());
+    let notice = if count > 0 {
+        Some(format!(
+            "── Прошлый процесс не завершился штатно: продолжаю сессию #{last_id} ({count} сообщений, активность {when}). /reset — начать с чистого листа ──"
+        ))
+    } else {
+        let id = state.new_session(provider, model);
+        return (state_db::SessionHandle::new(state.clone(), id), None);
+    };
+    (state_db::SessionHandle::new(state.clone(), last_id), notice)
+}
+
+/// Штатный выход: clean_shutdown=1, снимаем resume_pending.
+pub fn mark_clean_shutdown(state: &state_db::StateDb, session_id: i64) {
+    state.meta_set(state_db::meta_keys::CLEAN_SHUTDOWN, "1");
+    state.meta_set(state_db::meta_keys::CRASH_STREAK, "0");
+    state.set_resume_pending(session_id, false);
+}
 
 /// Грубая оценка токенов: для смеси русского/английского ~3 символа на
 /// токен. Нужно как фолбэк, когда провайдер не присылает usage (Ollama
@@ -188,6 +267,14 @@ pub struct Agent {
     pub subagents: Arc<tools::subagent::SubAgentRunner>,
     /// Момент старта — для аптайма в /stats.
     pub started: std::time::Instant,
+    /// Каноническое хранилище (src/state_db.rs, SQLite WAL) — сообщения и
+    /// tool-calls пишутся инкрементально ПО МЕРЕ хода, а не после ответа.
+    pub state: Arc<state_db::StateDb>,
+    /// Текущая сессия в state_db (меняется /reset-ом — создаётся новая).
+    session: state_db::SessionHandle,
+    /// Заметка recovery для интерфейса (TUI показывает при старте):
+    /// «сессия не завершилась штатно — продолжаю» и т.п.
+    pub recovery_notice: Option<String>,
 }
 
 impl Agent {
@@ -221,7 +308,13 @@ impl Agent {
         // провайдера (или падал бы с ошибкой соединения, если Ollama не
         // запущен). `create_llm_client()` в llm.rs уже делает правильный
         // выбор клиента по `config.provider` — просто не был здесь вызван.
-        let llm: Box<dyn LLMClient> = create_llm_client(config);
+        let llm: Box<dyn LLMClient> = create_llm_client(config.clone());
+
+        // Каноническое хранилище: SQLite WAL (state_db.rs). Здесь же —
+        // решение recovery (шаг «надёжности»): штатно ли завершился
+        // прошлый процесс и продолжать ли ту же сессию.
+        let state = state_db::StateDb::open_default();
+        let (session, recovery_notice) = recover_session(&state, config.provider.as_str(), &config.model);
 
         Self {
             llm,
@@ -246,6 +339,9 @@ impl Agent {
             llm_config,
             subagents,
             started: std::time::Instant::now(),
+            state,
+            session,
+            recovery_notice,
         }
     }
 
@@ -254,6 +350,7 @@ impl Agent {
     /// subagent::spawn через crate::build_sub_agent.
     pub fn build_sub_agent(runner: &Arc<tools::subagent::SubAgentRunner>) -> Self {
         let monitoring = Arc::new(monitoring::MonitoringSystem::new());
+        let mut sub_session;
         Self {
             llm: create_llm_client(runner.cfg.clone()),
             tools: runner.registry.get().cloned().expect("реестр привязан при старте"),
@@ -277,6 +374,15 @@ impl Agent {
             llm_config: runner.cfg.clone(),
             subagents: Arc::clone(runner),
             started: std::time::Instant::now(),
+            // Суб-агент: эфемерное in-memory хранилище — диалоги суб-агентов
+            // не должны попадать в каноническую БД основной сессии.
+            state: {
+                let sub = state_db::StateDb::open_in_memory();
+                sub_session = state_db::SessionHandle::new(sub.clone(), -1);
+                sub
+            },
+            session: sub_session,
+            recovery_notice: None,
         }
     }
 
@@ -383,8 +489,12 @@ impl Agent {
 
 
     pub async fn chat(&mut self, user_input: &str, _max_iterations: usize, _auto_approve: bool) -> String {
+        let user_msg = LLMMessage::user(user_input.to_string());
+        // ИНКРЕМЕНТАЛЬНАЯ ЗАПИСЬ (state_db.rs): сообщение пользователя
+        // попадает в SQLite СРАЗУ — краш в любой момент хода не теряет его.
+        self.session.append_message(&user_msg);
         let mut messages = self.messages.lock().await;
-        messages.push(LLMMessage::user(user_input.to_string()));
+        messages.push(user_msg);
         drop(messages);
 
         // Smart Compression: если контекст слишком разросся, сжимаем
@@ -598,23 +708,45 @@ self.monitoring.record_llm_request(self.llm_provider_name, &self.llm_model_name,
                     }
                 }
 
+                // PERSISTENT STATE-MACHINE (state_db.rs): каждый вызов
+                // инструмента записывается как pending ДО выполнения и
+                // переводится в running/completed/error по факту. После
+                // краша `unfinished_tool_calls` покажет, что было
+                // недоделано (по образцу tool-part'ов opencode).
+                for tc in &tool_calls {
+                    self.state
+                        .record_tool_call(self.session.id(), &tc.id, &tc.name, &tc.input);
+                }
+
                 // Инструменты одного хода выполняются конкурентно
                 // (Async Executor) — реестр сейчас Arc-обёрнутый
                 // (`SharedToolRegistry`), поэтому клонирование дёшево и
                 // безопасно для параллельных вызовов.
                 turn_tools.extend(tool_calls.iter().map(|tc| tc.name.clone()));
+                let state_for_tools = self.state.clone();
                 let futures = tool_calls.iter().map(|tc| {
                     let tools = self.tools.clone();
                     let name = tc.name.clone();
                     let input = tc.input.clone();
+                    let call_id = tc.id.clone();
+                    let state_db = state_for_tools.clone();
                     async move {
+                        state_db.mark_tool_running(&call_id);
                         let started = Instant::now();
                         let result = tools.execute(&name, &input).await;
                         let result = match result {
                             Some(r) => r,
                             None => ToolResult::error(format!("Tool not found: {}", name)),
                         };
-                        (name, input, result, started.elapsed().as_secs_f64() * 1000.0)
+                        let dur = started.elapsed().as_secs_f64() * 1000.0;
+                        let ok = result.success;
+                        let out_or_err = if ok {
+                            result.output.clone()
+                        } else {
+                            result.error.clone().unwrap_or_else(|| "Unknown error".to_string())
+                        };
+                        state_db.finish_tool_call(&call_id, ok, &out_or_err, dur);
+                        (name, input, result, dur)
                     }
                 });
                 let executed: Vec<(String, serde_json::Value, ToolResult, f64)> = join_all(futures).await;
@@ -682,7 +814,7 @@ self.monitoring.record_llm_request(self.llm_provider_name, &self.llm_model_name,
                 //      tool_calls ждут именно tool-сообщения, а не user —
                 //      иначе поведение не определено/ошибка).
                 let mut messages = self.messages.lock().await;
-                messages.push(LLMMessage::assistant_with_tools(
+                let assistant_tools_msg = LLMMessage::assistant_with_tools(
                     response.content.clone(),
                     tool_results
                         .iter()
@@ -693,16 +825,24 @@ self.monitoring.record_llm_request(self.llm_provider_name, &self.llm_model_name,
                             input: tc.input.clone(),
                         })
                         .collect(),
-                ));
+                );
+                messages.push(assistant_tools_msg.clone());
+                self.session.append_message(&assistant_tools_msg);
+                let mut tool_msgs: Vec<LLMMessage> = Vec::new();
                 for (id, name, result) in &tool_results {
                     let text = if result.success {
                         format!("[{}] {}", name, result.output)
                     } else {
                         format!("[{}] ОШИБКА: {}", name, result.error.clone().unwrap_or_else(|| "Unknown error".to_string()))
                     };
-                    messages.push(LLMMessage::tool_result(id.clone(), text));
+                    let m = LLMMessage::tool_result(id.clone(), text);
+                    messages.push(m.clone());
+                    tool_msgs.push(m);
                 }
                 drop(messages);
+                for m in &tool_msgs {
+                    self.session.append_message(m);
+                }
             } else {
                 // ИТЕРАЦИОННОЕ НАПОМИНАНИЕ (как system-reminder в CC): если
                 // финальный текст ЗАЯВЛЯЕТ успех, а верифицирующего
@@ -718,8 +858,16 @@ self.monitoring.record_llm_request(self.llm_provider_name, &self.llm_model_name,
                 if claims_success && !verified {
                     text.push_str("\n\n⚠️ Самопроверка: успех заявлен, но верифицирующая команда в этом ходе не запускалась.");
                 }
+                let final_msg = LLMMessage::assistant(text.clone());
                 let mut messages = self.messages.lock().await;
-                messages.push(LLMMessage::assistant(text.clone()));
+                messages.push(final_msg.clone());
+                drop(messages);
+                // Успешный финал хода: снимаем resume_pending и обнуляем
+                // счётчик крашей (Hermes: флаг живёт только до успешного
+                // хода — иначе один сбой навсегда «повисшего» статуса).
+                self.state.set_resume_pending(self.session.id(), false);
+                self.state.meta_set(state_db::meta_keys::CRASH_STREAK, "0");
+                self.session.append_message(&final_msg);
                 return text;
             }
         }
@@ -756,6 +904,11 @@ self.monitoring.record_llm_request(self.llm_provider_name, &self.llm_model_name,
     pub async fn reset(&self) {
         let mut messages = self.messages.lock().await;
         messages.clear();
+        drop(messages);
+        // /reset — новая сессия в каноническом хранилище (старая остаётся
+        // в БД как архив, транскрипты не уничтожаются).
+        let new_id = self.state.new_session(&self.llm_provider_name, &self.llm_model_name);
+        self.session.set_id(new_id);
     }
 
     /// Smart Compression: если история диалога разрослась, сжимает старую
@@ -821,12 +974,19 @@ self.monitoring.record_llm_request(self.llm_provider_name, &self.llm_model_name,
                     tool_call_id: None,
                 }];
                 new_messages.extend(recent_messages);
-                *messages = new_messages;
+                let compressed_count = new_messages.len();
+                *messages = new_messages.clone();
+                drop(messages);
+                // СИНХРОНИЗАЦИЯ С БД: после сжатия канонический транскрипт
+                // в SQLite перезаписывается тем же набором (сводка + хвост),
+                // иначе resume после краша загрузил бы исходную длинную
+                // историю без сводки (по образцу archive_and_compact Hermes).
+                self.session.replace_messages(&new_messages);
                 if self.debug {
                     logging_system::debug(&format!(
                         "Контекст сжат: было {} сообщений, стало {}",
                         old_messages.len() + KEEP_RECENT,
-                        messages.len()
+                        compressed_count
                     ));
                 }
             }
@@ -846,7 +1006,10 @@ self.monitoring.record_llm_request(self.llm_provider_name, &self.llm_model_name,
     /// Восстановить историю сообщений — для `/load` и восстановления сессии при старте.
     pub async fn load_messages(&mut self, msgs: Vec<LLMMessage>) {
         let mut messages = self.messages.lock().await;
-        *messages = msgs;
+        *messages = msgs.clone();
+        drop(messages);
+        // Канонический транскрипт сессии приводим к загруженному набору.
+        self.session.replace_messages(&msgs);
     }
 
     /// Переключить провайдера/модель на лету (REPL-команды `/provider`,
@@ -858,6 +1021,19 @@ self.monitoring.record_llm_request(self.llm_provider_name, &self.llm_model_name,
         self.llm_model_name = config.model.clone();
         self.llm_model_label = format!("{}/{}", self.llm_provider_name, config.model);
         self.llm = create_llm_client(config);
+        // Смена провайдера/модели фиксируется в текущей сессии БД.
+        self.state.set_session_provider_model(self.session.id(), self.llm_provider_name, &self.llm_model_name);
+    }
+
+    /// Идентификатор текущей сессии в state.db — для recovery-логики REPL.
+    pub fn session_id(&self) -> i64 {
+        self.session.id()
+    }
+
+    /// Недоделанные tool-вызовы текущей сессии (после краша) — для заметки
+    /// recovery в TUI.
+    pub fn unfinished_tool_calls(&self) -> Vec<state_db::ToolCallRow> {
+        self.state.unfinished_tool_calls(self.session.id())
     }
 
     pub fn current_provider_and_model(&self) -> (&'static str, &str) {

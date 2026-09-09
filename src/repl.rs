@@ -208,25 +208,77 @@ async fn run_app(
 
     let mut history: Vec<HistoryEntry> = Vec::new();
 
-    if let Some(saved) = session_store::load() {
-        let count = saved.messages.len();
-        // ИСПРАВЛЕНО: раньше в чат попадала только строка "восстановлено
-        // N сообщений" — сам агент (Agent::load_messages) видел
-        // содержимое, а видимая история TUI (`history`, отдельный
-        // список от `Agent.messages`) — нет. Пользователь не мог понять,
-        // ЧТО именно восстановилось, не листая логи. Теперь содержимое
-        // тоже попадает в видимую историю.
-        for msg in &saved.messages {
+    // ВОССТАНОВЛЕНИЕ (state_db.rs — канонический стор SQLite):
+    // 1) Recovery-заметка от Agent::new (краш прошлого процесса / новая
+    //    сессия после 3+ крашей подряд).
+    // 2) Недоделанные tool-вызовы прошлой сессии (pending/running).
+    // 3) История сообщений — ИЗ БД. session.json используется только как
+    //    одноразовая миграция, если БД пуста, а legacy-файл есть.
+    {
+        let mut a = agent.lock().await;
+        if let Some(notice) = &a.recovery_notice {
+            history.push(HistoryEntry::new(Role::System, notice.clone()));
+        }
+        let unfinished = a.unfinished_tool_calls();
+        if !unfinished.is_empty() {
+            let mut lines = vec![format!(
+                "⚠️ В прошлой сессии осталось {} недоделанный(х) вызов(ов) инструментов:",
+                unfinished.len()
+            )];
+            for tc in unfinished.iter().take(10) {
+                lines.push(format!("   [{}] {} — статус: {}", tc.name, tc.call_id, tc.status));
+            }
+            history.push(HistoryEntry::new(Role::System, lines.join("\n")));
+        }
+        let restored = a.state.load_messages(a.session_id());
+        let count = restored.len();
+        for msg in &restored {
             history.push(HistoryEntry::new(llm_role_to_repl_role(&msg.role), msg.content.clone()));
         }
-        agent.lock().await.load_messages(saved.messages).await;
-        history.push(HistoryEntry::new(
-            Role::System,
-            format!(
-                "── Восстановлена предыдущая сессия: {} сообщений (сохранена {}) ──",
-                count, saved.saved_at
-            ),
-        ));
+        if count > 0 {
+            let when = a.state.session_updated_at(a.session_id()).unwrap_or_default();
+            history.push(HistoryEntry::new(
+                Role::System,
+                format!("── Восстановлена сессия #{}: {} сообщений (активность {}) ──", a.session_id(), count, when),
+            ));
+        }
+        // ВАЖНО: восстановленное должно попасть и в LLM-контекст агента
+        // (Agent.messages), а не только в видимую историю TUI.
+        if !restored.is_empty() {
+            a.load_messages(restored).await;
+        }
+    }
+
+    // Legacy-миграция: БД пуста, но старый session.json существует и ещё
+    // не переносился — переносим его содержимое в канонический стор один
+    // раз. Сам файл НЕ удаляем (остаётся бэкапом пользователя).
+    {
+        let migrated = agent.lock().await.state.meta_get(crate::state_db::meta_keys::JSON_MIGRATED);
+        let db_empty = agent.lock().await.state.count_messages(agent.lock().await.session_id()) == 0;
+        if migrated.is_none() && db_empty {
+            if let Some(saved) = session_store::load() {
+                if !saved.messages.is_empty() {
+                    let count = saved.messages.len();
+                    for msg in &saved.messages {
+                        history.push(HistoryEntry::new(llm_role_to_repl_role(&msg.role), msg.content.clone()));
+                    }
+                    agent.lock().await.load_messages(saved.messages.clone()).await;
+                    agent.lock().await.state.meta_set(crate::state_db::meta_keys::JSON_MIGRATED, "1");
+                    history.push(HistoryEntry::new(
+                        Role::System,
+                        format!(
+                            "── Перенесена старая сессия из session.json: {} сообщений (теперь история хранится в state.db) ──",
+                            count
+                        ),
+                    ));
+                } else {
+                    agent.lock().await.state.meta_set(crate::state_db::meta_keys::JSON_MIGRATED, "1");
+                }
+            } else {
+                // Файла нет — сразу помечаем, чтобы не проверять при каждом старте.
+                agent.lock().await.state.meta_set(crate::state_db::meta_keys::JSON_MIGRATED, "1");
+            }
+        }
     }
 
     history.push(HistoryEntry::new(
@@ -1321,6 +1373,7 @@ async fn handle_command(
                     "  /mcp           — подключённые MCP-серверы и их инструменты",
                     "  /mcp reload    — перечитать ~/.hephaestus/mcp.toml и переподключить",
                     "  /stats         — статистика (токены, вызовы LLM/инструментов)",
+                    "  /toolcalls     — журнал вызовов инструментов сессии (статусы, ошибки)",
                     "  /compress      — принудительно сжать контекст диалога",
                     "  /exit, /quit   — выход",
                     "",
@@ -1346,8 +1399,10 @@ async fn handle_command(
         "save" => match agent.try_lock() {
             Ok(a) => {
                 let msgs = a.snapshot_messages().await;
+                // Канонический стор (state.db) уже актуален — chat() пишет
+                // инкрементально. /save — это легаси-экспорт в session.json.
                 match session_store::save(&msgs) {
-                    Ok(path) => history.push(HistoryEntry::new(Role::System, format!("Сессия сохранена: {}", path.display()))),
+                    Ok(path) => history.push(HistoryEntry::new(Role::System, format!("Сессия сохранена (экспорт JSON): {}", path.display()))),
                     Err(e) => history.push(HistoryEntry::new(Role::Error, format!("Не удалось сохранить сессию: {}", e))),
                 }
             }
@@ -1360,6 +1415,7 @@ async fn handle_command(
                     for msg in &data.messages {
                         history.push(HistoryEntry::new(llm_role_to_repl_role(&msg.role), msg.content.clone()));
                     }
+                    // load_messages синхронизирует и память, и каноническую БД.
                     a.load_messages(data.messages).await;
                     history.push(HistoryEntry::new(Role::System, format!("── Загружена сессия: {} сообщений ──", count)));
                 }
@@ -1382,6 +1438,34 @@ async fn handle_command(
             Ok(a) => {
                 let report = a.stats_report().await;
                 history.push(HistoryEntry::new(Role::System, format!("Статистика:\n{}", report)));
+            }
+            Err(_) => history.push(HistoryEntry::new(Role::System, "Агент занят — попробуйте ещё раз чуть позже.")),
+        },
+        "toolcalls" => match agent.try_lock() {
+            Ok(a) => {
+                let rows = a.unfinished_tool_calls();
+                let all = a.state.list_tool_calls(a.session_id());
+                let mut lines = vec![format!("Tool-вызовы сессии #{} (всего {}):", a.session_id(), all.len())];
+                let tail: Vec<_> = all.iter().rev().take(25).collect();
+                for tc in tail.into_iter().rev() {
+                    let mark = match tc.status.as_str() {
+                        "completed" => "✅",
+                        "error" => "❌",
+                        "running" => "⏳",
+                        _ => "🕐",
+                    };
+                    let mut line = format!("  {} [{}] {} ({})", mark, tc.status, tc.name, tc.call_id);
+                    if let Some(e) = &tc.error {
+                        let short = crate::truncate_chars(e, 80);
+                        line.push_str(&format!(" — {}", short));
+                    }
+                    lines.push(line);
+                }
+                let pending: Vec<_> = rows.iter().filter(|r| r.status != "error").collect();
+                if !pending.is_empty() {
+                    lines.push(format!("⚠️ Недоделанных (pending/running): {}", pending.len()));
+                }
+                history.push(HistoryEntry::new(Role::System, lines.join("\n")));
             }
             Err(_) => history.push(HistoryEntry::new(Role::System, "Агент занят — попробуйте ещё раз чуть позже.")),
         },
@@ -1814,10 +1898,13 @@ async fn handle_checkpoint_save(name: &str, agent: &Arc<Mutex<Agent>>, history: 
 }
 
 async fn graceful_save(agent: &Arc<Mutex<Agent>>) {
-    // try_lock, чтобы не подвиснуть, если агент в этот момент занят
-    // долгим вызовом LLM — в таком случае просто выходим без сохранения
-    // самого последнего незавершённого хода, но не блокируем выход.
+    // Штатный выход: clean_shutdown-маркер в state.db (recovery при
+    // следующем старте увидит «выход был нормальный», не станет
+    // продолжать сессию и обнулит счётчик крашей).
     if let Ok(a) = agent.try_lock() {
+        let sid = a.session_id();
+        crate::mark_clean_shutdown(&a.state, sid);
+        // Легаси-экспорт session.json — сохранён как побочный бэкап.
         let msgs = a.snapshot_messages().await;
         let _ = session_store::save(&msgs);
     }
