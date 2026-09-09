@@ -57,6 +57,7 @@ mod learning;
  mod parser;
  mod system_prompt;
  mod state_db;
+ mod tool_guard;
 
 // НЕ подключены сознательно (пересмотрено в итерации 7 — caching.rs,
 // task_manager.rs и learning.rs, которые раньше здесь тоже упоминались,
@@ -503,6 +504,10 @@ impl Agent {
         self.compress_context_if_needed().await;
 
         let mut turn_tools: Vec<String> = Vec::new();
+        // DOOM-LOOP DETECTOR (tool_guard.rs): живёт весь ход — если модель
+        // вызывает один и тот же инструмент с теми же аргументами больше
+        // DOOM_LOOP_LIMIT раз ПОДРЯД, вызов блокируется с объяснением.
+        let mut doom_detector = tool_guard::DoomLoopDetector::new();
         for iteration in 0..self.max_iterations {
             if self.debug {
                 // ИСПРАВЛЕНО: было `eprintln!` — в TUI-режиме (repl.rs,
@@ -763,6 +768,20 @@ self.monitoring.record_llm_request(self.llm_provider_name, &self.llm_model_name,
                     }
                 }
 
+                // DOOM-LOOP: идентичные вызовы подряд блокируются ДО
+                // выполнения (блокировка записывается как tool-результат,
+                // чтобы модель видела объяснение и меняла подход).
+                let mut blocked: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
+                for (i, tc) in tool_calls.iter().enumerate() {
+                    if let Err(expl) = doom_detector.check(&tc.name, &tc.input) {
+                        logging_system::warning(&format!(
+                            "[doom-loop] блокирован вызов {} ({}): {} повторов подряд",
+                            tc.name, tc.id, tool_guard::DOOM_LOOP_LIMIT
+                        ));
+                        blocked.insert(i, expl);
+                    }
+                }
+
                 // PERSISTENT STATE-MACHINE (state_db.rs): каждый вызов
                 // инструмента записывается как pending ДО выполнения и
                 // переводится в running/completed/error по факту. После
@@ -776,32 +795,54 @@ self.monitoring.record_llm_request(self.llm_provider_name, &self.llm_model_name,
                 // Инструменты одного хода выполняются конкурентно
                 // (Async Executor) — реестр сейчас Arc-обёрнутый
                 // (`SharedToolRegistry`), поэтому клонирование дёшево и
-                // безопасно для параллельных вызовов.
+                // безопасно для параллельных вызовов. Заблокированные
+                // doom-loop'ом не выполняются вовсе — сразу error-результат.
                 turn_tools.extend(tool_calls.iter().map(|tc| tc.name.clone()));
                 let state_for_tools = self.state.clone();
-                let futures = tool_calls.iter().map(|tc| {
+                let futures = tool_calls.iter().enumerate().map(|(i, tc)| {
                     let tools = self.tools.clone();
                     let name = tc.name.clone();
                     let input = tc.input.clone();
                     let call_id = tc.id.clone();
                     let state_db = state_for_tools.clone();
+                    let blocked_msg = blocked.get(&i).cloned();
                     async move {
-                        state_db.mark_tool_running(&call_id);
-                        let started = Instant::now();
-                        let result = tools.execute(&name, &input).await;
-                        let result = match result {
-                            Some(r) => r,
-                            None => ToolResult::error(format!("Tool not found: {}", name)),
-                        };
-                        let dur = started.elapsed().as_secs_f64() * 1000.0;
-                        let ok = result.success;
-                        let out_or_err = if ok {
-                            result.output.clone()
-                        } else {
-                            result.error.clone().unwrap_or_else(|| "Unknown error".to_string())
-                        };
-                        state_db.finish_tool_call(&call_id, ok, &out_or_err, dur);
-                        (name, input, result, dur)
+                        match blocked_msg {
+                            Some(expl) => {
+                                state_db.finish_tool_call(&call_id, false, &format!("doom-loop: {expl}"), 0.0);
+                                (name, input, ToolResult::error(expl), 0.0)
+                            }
+                            None => {
+                                state_db.mark_tool_running(&call_id);
+                                let started = Instant::now();
+                                let result = tools.execute(&name, &input).await;
+                                let result = match result {
+                                    Some(r) => r,
+                                    None => ToolResult::error(format!("Tool not found: {}", name)),
+                                };
+                                let dur = started.elapsed().as_secs_f64() * 1000.0;
+                                let ok = result.success;
+                                let out_or_err = if ok {
+                                    result.output.clone()
+                                } else {
+                                    result.error.clone().unwrap_or_else(|| "Unknown error".to_string())
+                                };
+                                // BOUND TOOL OUTPUT (tool_guard.rs): большой
+                                // вывод не тащится ни в БД, ни в контекст —
+                                // полный текст выгружается в файл, дальше
+                                // идёт голова+хвост с путём. Единая точка:
+                                // и транскрипт tool_calls, и история, и
+                                // learning/hook видят обрезанную версию.
+                                let bounded = tool_guard::bound_tool_output(&call_id, &out_or_err);
+                                state_db.finish_tool_call(&call_id, ok, &bounded, dur);
+                                let result = if ok {
+                                    ToolResult::success(bounded)
+                                } else {
+                                    ToolResult::error(bounded)
+                                };
+                                (name, input, result, dur)
+                            }
+                        }
                     }
                 });
                 let executed: Vec<(String, serde_json::Value, ToolResult, f64)> = join_all(futures).await;
