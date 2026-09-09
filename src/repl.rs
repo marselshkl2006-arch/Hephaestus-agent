@@ -110,6 +110,9 @@ enum Role {
     Assistant,
     System,
     Error,
+    /// Дифф изменения файла (как в opencode): рендерится построчно —
+    /// `+` зелёным, `-` красным, контекст приглушённо.
+    Diff,
 }
 
 #[derive(Clone)]
@@ -925,7 +928,44 @@ async fn run_voice_mode(
 fn tool_progress_hook(
     tx: mpsc::UnboundedSender<ReplMsg>,
 ) -> Box<dyn Fn(&str, &serde_json::Value, bool, &str) + Send + Sync> {
-    Box::new(move |name, _args, success, output| {
+    Box::new(move |name, args, success, output| {
+        // КРАСИВЫЕ ДИФФЫ (как в opencode): file_edit/file_write несут
+        // unified-diff в выводе — выносим его ОТДЕЛЬНОЙ записью Role::Diff,
+        // чтобы рендер раскрасил +зелёным/−красным построчно.
+        if success && matches!(name, "file_edit" | "file_write") {
+            if let Some(path) = args.get("file_path").and_then(|v| v.as_str()) {
+                // Ищем блок диффа в выводе: от "Изменения (+N/−M):" до
+                // конца вывода (дифф — последний блок).
+                if let Some(pos) = output.find("Изменения (+") {
+                    let after_marker = &output[pos + "Изменения (+".len()..];
+                    // пропускаем "+N/−M):" до первого \n
+                    let diff_body = after_marker
+                        .find('\n')
+                        .map(|i| &after_marker[i + 1..])
+                        .unwrap_or("");
+                    let diff_body = diff_body.trim_end();
+                    if !diff_body.is_empty() {
+                        let header = HistoryEntry::new(
+                            Role::System,
+                            format!("📝 {} — {} (+{}/−{})", name, path,
+                                diff_body.lines().filter(|l| l.starts_with('+')).count(),
+                                diff_body.lines().filter(|l| l.starts_with('-')).count()),
+                        );
+                        let _ = tx.send(ReplMsg::Update(header));
+                        let diff_entry = HistoryEntry::new(
+                            Role::Diff,
+                            format!("--- {}\n{}", path, diff_body),
+                        );
+                        let _ = tx.send(ReplMsg::Update(diff_entry));
+                        return;
+                    }
+                }
+                // Новый файл — короткая запись с числом строк.
+                let entry = HistoryEntry::new(Role::System, format!("📝 {} — создан", path));
+                let _ = tx.send(ReplMsg::Update(entry));
+                return;
+            }
+        }
         // Ошибки инструментов — КРАСНЫЕ (Role::Error), а не серые: в TUI
         // провал должен бросаться в глаза так же, как в Telegram.
         let entry = if success {
@@ -2059,6 +2099,55 @@ fn role_style(role: Role) -> (Style, &'static str) {
         Role::Assistant => (Style::default().fg(Color::Green).add_modifier(Modifier::BOLD), "Гефест"),
         Role::System => (Style::default().fg(Color::DarkGray), "•"),
         Role::Error => (Style::default().fg(Color::Red).add_modifier(Modifier::BOLD), "Ошибка"),
+        Role::Diff => (Style::default().fg(Color::DarkGray), "diff"),
+    }
+}
+
+/// Построчная раскраска содержимого записи (markdown-подмножество, как в
+/// opencode): заголовки — жирные цветные, код-блоки — приглушённые,
+/// таблицы — синие, цитаты — серые. Возвращает Style для ВСЕЙ строки
+/// (спаны рвутся hard-wrap'ом, построчная окраска — самый надёжный
+/// уровень без переустройства рендера).
+fn content_line_style(line: &str, in_code: bool) -> ratatui::style::Style {
+    let t = line.trim_start();
+    if in_code {
+        return Style::default().fg(Color::Cyan);
+    }
+    if let Some(h) = t.strip_prefix("### ") {
+        let _ = h;
+        return Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
+    }
+    if let Some(h) = t.strip_prefix("## ") {
+        let _ = h;
+        return Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    }
+    if let Some(h) = t.strip_prefix("# ") {
+        let _ = h;
+        return Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+    }
+    if t.starts_with("```") {
+        return Style::default().fg(Color::DarkGray);
+    }
+    if t.starts_with('|') {
+        return Style::default().fg(Color::Blue);
+    }
+    if t.starts_with("> ") {
+        return Style::default().fg(Color::Gray).add_modifier(Modifier::ITALIC);
+    }
+    Style::default()
+}
+
+/// Построчная раскраска ДИФФА: добавленное — зелёным, удалённое —
+/// красным, заголовки ханков/файлов и контекст — приглушённо.
+fn diff_line_style(line: &str) -> ratatui::style::Style {
+    if line.starts_with('+') {
+        Style::default().fg(Color::Green)
+    } else if line.starts_with('-') {
+        Style::default().fg(Color::Red)
+    } else if line.starts_with("@@") || line.starts_with("...") {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
     }
 }
 
@@ -2237,7 +2326,22 @@ fn draw_ui(
         } else {
             let prefix_len = format!("[{}] {}: ", entry.time, label).chars().count();
             let mut is_first_nl_line = true;
+            // Отслеживаем код-блоки для построчной раскраски (```...```),
+            // дифф раскрашивается по префиксам строк.
+            let mut in_code = false;
             for raw_line in entry.text.lines() {
+                if entry.role == Role::Assistant || entry.role == Role::System {
+                    if raw_line.trim_start().starts_with("```") {
+                        in_code = !in_code;
+                    }
+                }
+                let base_style = if entry.role == Role::Diff {
+                    diff_line_style(raw_line)
+                } else if entry.role == Role::Assistant || entry.role == Role::System {
+                    content_line_style(raw_line, in_code)
+                } else {
+                    Style::default()
+                };
                 let this_width = if is_first_nl_line {
                     available_width.saturating_sub(prefix_len).max(1)
                 } else {
@@ -2249,11 +2353,14 @@ fn draw_ui(
                         all_lines.push(Line::from(vec![
                             Span::styled(format!("[{}] ", entry.time), Style::default().fg(Color::DarkGray)),
                             Span::styled(format!("{}: ", label), style),
-                            Span::raw(piece.clone()),
+                            Span::styled(piece.clone(), base_style),
                         ]));
                         plain_out.push(format!("[{}] {}: {}", entry.time, label, piece));
                     } else {
-                        all_lines.push(Line::from(vec![Span::raw(format!("{}{}", continuation_indent, piece))]));
+                        all_lines.push(Line::from(vec![Span::styled(
+                            format!("{}{}", continuation_indent, piece),
+                            base_style,
+                        )]));
                         plain_out.push(format!("{}{}", continuation_indent, piece));
                     }
                 }
@@ -2304,8 +2411,16 @@ fn draw_ui(
     } else {
         " Диалог ".to_string()
     };
+    // СКРУГЛЁННЫЕ РАМКИ (как в opencode): ╭─╮ │ ╰─╯ вместо ┌─┐ └─┘,
+    // рамка чата — приглушённо-серая, не чёрная.
+    let chat_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title_style(Style::default().fg(Color::Gray))
+        .title(chat_title);
     let chat = Paragraph::new(Text::from(all_lines[start..end].to_vec()))
-        .block(Block::default().borders(Borders::ALL).title(chat_title))
+        .block(chat_block)
         .wrap(Wrap { trim: false });
     f.render_widget(chat, chunks[chat_idx]);
 
@@ -2356,8 +2471,14 @@ fn draw_ui(
                 ])
             })
             .collect();
-        let suggest_widget = Paragraph::new(Text::from(lines))
-            .block(Block::default().borders(Borders::ALL).title(" Команды "));
+        let suggest_widget = Paragraph::new(Text::from(lines)).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(ratatui::widgets::BorderType::Rounded)
+                .border_style(Style::default().fg(Color::DarkGray))
+                .title_style(Style::default().fg(Color::Yellow))
+                .title(" Команды "),
+        );
         if let Some(si) = sugg_idx { f.render_widget(suggest_widget, chunks[si]); }
     }
 
@@ -2367,6 +2488,15 @@ fn draw_ui(
         format!(" {} агент думает... ", SPINNER_FRAMES[spinner_frame])
     } else {
         " Ввод (Enter — отправить, /help — команды, Ctrl+C — выход) ".to_string()
+    };
+    // Рамка ввода меняет ЦВЕТ по состоянию: ждёт разрешения — жёлтая,
+    // агент думает — голубая, свободен — приглушённо-серая.
+    let input_border = if perm_waiting {
+        Style::default().fg(Color::Yellow)
+    } else if busy {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
     };
 
     // Курсор рисуем явным разбиением строки на "до" и "после" — ratatui
@@ -2403,7 +2533,14 @@ fn draw_ui(
     }
     spans.push(Span::raw(after));
 
-    let input_widget = Paragraph::new(Line::from(spans)).block(Block::default().borders(Borders::ALL).title(input_title));
+    let input_widget = Paragraph::new(Line::from(spans)).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(input_border)
+            .title_style(input_border.add_modifier(Modifier::BOLD))
+            .title(input_title),
+    );
     f.render_widget(input_widget, chunks[input_idx]);
 }
 
