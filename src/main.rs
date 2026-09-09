@@ -518,7 +518,11 @@ impl Agent {
                 logging_system::debug(&format!("Iteration {}", iteration));
             }
 
-            let messages = self.messages.lock().await;
+            // mut — retry-политика CompressAndRetry перезагружает guard
+            // после сжатия (ниже). tool_schemas идёт за holder-переменной:
+            // после сжатия набор схем не меняется, но guard сообщений
+            // пересоздаётся, поэтому обе живут в мутабельных локальных.
+            let mut messages = self.messages.lock().await;
             let started = Instant::now();
             // Раньше здесь был self.llm.chat(&messages) — тот вызывает
             // LLMClient::complete() без единой схемы инструмента в поле
@@ -526,7 +530,7 @@ impl Agent {
             // один инструмент, сколько бы их ни было зарегистрировано в
             // self.tools — не баг конкретного инструмента, а разрыв во
             // всей цепочке. См. ToolRegistry::to_api_schemas в tools/mod.rs.
-            let tool_schemas = self.tools.to_api_schemas();
+            let mut tool_schemas_holder = self.tools.to_api_schemas();
             // learning.rs (итерация 7): если по прошлому опыту сессии
             // какой-то инструмент часто падает или известны предпочтения
             // пользователя — подмешиваем это системным подсказом. Пусто,
@@ -592,10 +596,17 @@ impl Agent {
                 }
             });
 
-            // RETRY/BACKOFF: сетевые сбои и перегрузка (429/503/таймауты)
-            // — норма для LLM-шлюзов. До 3 попыток с паузами 400мс → 800мс,
-            // и только если классификатор считает ошибку повторяемой
-            // (404/права — повторы бессмысленны, сразу отдаём ошибку).
+            // Флаг: сжатие по переполнению контекста уже сделано в этом
+            // ходе — второй раз не делаем (иначе цикл сжатий).
+            let mut compressed_this_turn = false;
+
+            // RETRY/BACKOFF по ПОЛИТИКЕ КЛАССИФИКАТОРА (error_handler.rs):
+            // Network/Timeout/RateLimit — повтор с backoff 400мс → 800мс,
+            // ContextOverflow — ОДНО сжатие контекста и повтор (переполнение
+            // окна не лечится ожиданием), Auth/Billing/404/Validation —
+            // FailFast (повтор воспроизведёт ту же ошибку).
+            // Пустой ответ ×2 подряд — детерминированный баг провайдера
+            // (empty_response_guard из Hermes): ретраи пропускаем.
             // Стрим включаем только для провайдеров с честным SSE —
             // node-шлюзы в stream:true теряют корректную обработку tools.
             let stream_supported = !matches!(
@@ -604,12 +615,13 @@ impl Agent {
             );
             let response = {
                 let mut attempt: u32 = 0;
+                let mut consecutive_empty: u32 = 0;
                 loop {
                     attempt += 1;
-                    match if stream_supported {
+                    let call = if stream_supported {
                         self.llm.complete_with_tools_stream(
                             &messages,
-                            &tool_schemas,
+                            &tool_schemas_holder,
                             Some(system_prompt.as_str()),
                             std::sync::Arc::clone(&on_text),
                         )
@@ -617,21 +629,63 @@ impl Agent {
                     } else {
                         self.llm.complete_with_tools(
                             &messages,
-                            &tool_schemas,
+                            &tool_schemas_holder,
                             Some(system_prompt.as_str()),
                         )
                         .await
-                    } {
-                        Ok(r) => break r,
+                    };
+                    match call {
+                        Ok(r) => {
+                            // EMPTY-RESPONSE GUARD: пустой контент И без
+                            // tool-вызовов — ничто. Один пустой ответ —
+                            // случайность (модель грузится), два подряд —
+                            // детерминированный сбой endpoint'а.
+                            if r.content.trim().is_empty() && r.tool_use_blocks.is_empty() {
+                                consecutive_empty += 1;
+                                if consecutive_empty >= 2 || attempt >= 3 {
+                                    let raw = format!(
+                                        "LLM вернул пустой ответ {} раз подряд (endpoint: {}/{}). Проверьте /provider — сервер жив, но отдаёт пустоту.",
+                                        consecutive_empty, self.llm_provider_name, self.llm_model_name
+                                    );
+                                    logging_system::get_logger().log_llm_error(
+                                        &self.llm_model_label, "chat", &raw,
+                                    );
+                                    return raw;
+                                }
+                                logging_system::warning("[llm] пустой ответ — одна попытка повторить (empty-response guard)");
+                                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                                continue;
+                            }
+                            break r;
+                        }
                         Err(e) => {
                             let msg = e.to_string();
                             self.metrics.llm_errors.fetch_add(1, Ordering::Relaxed);
-                            let category = crate::error_handler::classify(&msg);
-                            if attempt >= 3 || !category.is_retryable() {
+                            let category = crate::error_handler::classify_llm(&msg);
+                            // Compress-and-retry: переполнение окна лечим
+                            // сжатием — но только ОДИН раз за ход, иначе
+                            // цикл "сжали — всё равно не влезло" крутится
+                            // бесконечно. compress_context_if_needed сам
+                            // синхронизирует канонический транскрипт в БД.
+                            if category.llm_policy() == crate::error_handler::Policy::CompressAndRetry
+                                && !compressed_this_turn
+                            {
+                                logging_system::warning(
+                                    "[llm] переполнение контекста — сжимаю историю и повторяю (один раз за ход)",
+                                );
+                                drop(messages);
+                                self.compress_context_if_needed().await;
+                                compressed_this_turn = true;
+                                messages = self.messages.lock().await;
+                                attempt = 0; // свежий бюджет попыток после сжатия
+                                continue;
+                            }
+                            if attempt >= 3 || category.llm_policy() == crate::error_handler::Policy::FailFast {
                                 logging_system::get_logger().log_llm_error(
                                     &self.llm_model_label, "chat", &msg,
                                 );
-                                return format!("LLM error: {msg}");
+                                drop(messages);
+                                return format!("LLM error ({}): {msg}", crate::error_handler::friendly_message(&msg));
                             }
                             let delay = std::time::Duration::from_millis(400 * 2u64.pow(attempt - 1));
                             logging_system::info(&format!(
@@ -644,6 +698,7 @@ impl Agent {
                 }
             };
             let mut response = response;
+            let tool_schemas = &tool_schemas_holder;
             // CUSTOM ADAPTER: нативный tool_calls всегда приоритетен. Если
             // endpoint отдал формальный `tool_name(json_arg, ...)` в content,
             // переводим его по тем же schemas, которые отправляли в запрос.
