@@ -59,6 +59,7 @@ mod learning;
  mod state_db;
  mod tool_guard;
  mod watchdog;
+ mod snapshots;
 
 // НЕ подключены сознательно (пересмотрено в итерации 7 — caching.rs,
 // task_manager.rs и learning.rs, которые раньше здесь тоже упоминались,
@@ -277,6 +278,9 @@ pub struct Agent {
     /// Заметка recovery для интерфейса (TUI показывает при старте):
     /// «сессия не завершилась штатно — продолжаю» и т.п.
     pub recovery_notice: Option<String>,
+    /// Снапшоты воркспейса (src/snapshots.rs) для /undo: коммит-снимок в
+    /// теневом репозитории перед каждым ходом.
+    pub snapshots: std::sync::Arc<snapshots::SnapshotManager>,
 }
 
 impl Agent {
@@ -317,6 +321,7 @@ impl Agent {
         // прошлый процесс и продолжать ли ту же сессию.
         let state = state_db::StateDb::open_default();
         let (session, recovery_notice) = recover_session(&state, config.provider.as_str(), &config.model);
+        let snapshots = std::sync::Arc::new(snapshots::SnapshotManager::new(workdir.get()));
 
         Self {
             llm,
@@ -344,6 +349,7 @@ impl Agent {
             state,
             session,
             recovery_notice,
+            snapshots,
         }
     }
 
@@ -385,6 +391,11 @@ impl Agent {
             },
             session: sub_session,
             recovery_notice: None,
+            // Суб-агент НЕ делает снимков воркспейса: общий workdir, снимки
+            // ведёт основной агент перед каждым ходом.
+            snapshots: std::sync::Arc::new(snapshots::SnapshotManager::new(
+                std::path::PathBuf::from("/nonexistent"),
+            )),
         }
     }
 
@@ -495,6 +506,12 @@ impl Agent {
         // suspended-пауз TUI во время sudo/ask_user: тик отрисовки стоит,
         // но процесс жив).
         crate::watchdog::bump("chat-start");
+        // UNDO-СНИМОК перед ходом: если агент испортит файлы, /undo
+        // вернёт состояние на этот момент. Best effort, ход не рвёт.
+        self.snapshots.snapshot_before_turn(&format!(
+            "before turn: {}",
+            user_input.chars().take(60).collect::<String>()
+        ));
         let user_msg = LLMMessage::user(user_input.to_string());
         // ИНКРЕМЕНТАЛЬНАЯ ЗАПИСЬ (state_db.rs): сообщение пользователя
         // попадает в SQLite СРАЗУ — краш в любой момент хода не теряет его.

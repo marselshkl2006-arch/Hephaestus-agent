@@ -100,6 +100,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("mcp", "MCP-серверы; /mcp reload — перечитать конфиг и переподключить"),
     ("stats", "статистика сессии"),
     ("compress", "сжать контекст диалога"),
+    ("undo", "откатить изменения файлов последнего хода агента"),
     ("exit", "выход"),
     ("quit", "выход"),
 ];
@@ -1492,8 +1493,7 @@ async fn handle_command(
             }
             Err(_) => history.push(HistoryEntry::new(Role::System, "Агент занят — попробуйте ещё раз чуть позже.")),
         },
-        "toolcalls" => match agent.try_lock() {
-            Ok(a) => {
+        "toolcalls" => match agent.try_lock() {            Ok(a) => {
                 let rows = a.unfinished_tool_calls();
                 let all = a.state.list_tool_calls(a.session_id());
                 let mut lines = vec![format!("Tool-вызовы сессии #{} (всего {}):", a.session_id(), all.len())];
@@ -1526,6 +1526,21 @@ async fn handle_command(
             } else if let Ok(mut a) = agent.try_lock() {
                 a.compress_context_if_needed().await;
                 history.push(HistoryEntry::new(Role::System, "Сжатие контекста запрошено (сработает, если история достаточно большая)."));
+            } else {
+                history.push(HistoryEntry::new(Role::System, "Агент занят — попробуйте ещё раз чуть позже."));
+            }
+        }
+        "undo" => {
+            if busy {
+                history.push(HistoryEntry::new(Role::System, "Нельзя откатывать, пока агент работает — подождите завершения хода."));
+            } else if let Ok(a) = agent.try_lock() {
+                match a.snapshots.undo_last() {
+                    Ok(report) => {
+                        history.push(HistoryEntry::new(Role::Diff, report));
+                        history.push(HistoryEntry::new(Role::System, "⚠️ В диалоге агенту стоит напомнить, что изменения отменены — или начните новый ход с уточнением."));
+                    }
+                    Err(e) => history.push(HistoryEntry::new(Role::Error, format!("Undo не удался: {}", e))),
+                }
             } else {
                 history.push(HistoryEntry::new(Role::System, "Агент занят — попробуйте ещё раз чуть позже."));
             }
