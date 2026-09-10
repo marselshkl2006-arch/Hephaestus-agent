@@ -1,0 +1,25 @@
+{
+  "name": "hephaestus-agent",
+  "version": "0.1.0",
+  "description": "Гефест — личный AI-напарник: код, система, БД, Telegram. Локальные модели first-class.",
+  "license": "UNLICENSED",
+  "private": true,
+  "bin": {
+    "hephaestus": "bin/hephaestus.js"
+  },
+  "scripts": {
+    "postinstall": "node postinstall.mjs"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "optionalDependencies": {
+    "hephaestus-linux-x64": "0.1.0",
+    "hephaestus-windows-x64": "0.1.0",
+    "hephaestus-macos-arm64": "0.1.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "ssh://git@git.marsel.local/hephaestus/hephaestus-rs.git"
+  }
+}

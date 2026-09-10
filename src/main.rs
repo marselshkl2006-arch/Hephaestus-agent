@@ -62,6 +62,7 @@ mod learning;
  mod snapshots;
  mod shell;
  mod interrupt;
+ mod bootstrap;
 #[cfg(test)]
 mod integration_tests;
 
@@ -1343,6 +1344,20 @@ self.monitoring.record_llm_request(self.llm_provider_name, &self.llm_model_name,
 
 #[tokio::main]
 async fn main() {
+    // BOOTSTRAP первого запуска: примеры конфигов вшиты в бинарник и
+    // распаковываются в ~/.hephaestus/ у каждого пользователя свои.
+    // Существующие файлы никогда не перезаписываются.
+    let bootstrapped = bootstrap::ensure_examples();
+    if !bootstrapped.is_empty() {
+        eprintln!("📁 Первый запуск: созданы примеры конфигов:");
+        for p in &bootstrapped {
+            eprintln!("   {}", p.display());
+        }
+        let home = std::env::var("HEPHAESTUS_HOME")
+            .unwrap_or_else(|_| dirs::home_dir().map(|h| h.join(".hephaestus")).unwrap_or_default().to_string_lossy().to_string());
+        eprintln!("   Токен Telegram: /telegram save <токен> (или {home}/telegram_token.txt)");
+        eprintln!();
+    }
     // ИСПРАВЛЕНО: раньше здесь был жёстко зашитый LLMConfig на Ollama —
     // единственный способ сменить провайдера/модель был править исходник
     // и пересобирать. Теперь конфиг читается из ~/.hephaestus/config.toml
