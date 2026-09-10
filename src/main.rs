@@ -61,6 +61,7 @@ mod learning;
  mod watchdog;
  mod snapshots;
  mod shell;
+ mod interrupt;
 #[cfg(test)]
 mod integration_tests;
 
@@ -563,6 +564,11 @@ impl Agent {
         messages.push(user_msg);
         drop(messages);
 
+        // INTERRUPT (interrupt.rs): маркер эпохи на старте хода — Esc в
+        // TUI инкрементирует счётчик, кооперативные точки отмены ниже
+        // останавливают ход между итерациями.
+        let interrupt_guard = interrupt::InterruptGuard::new();
+
         // Smart Compression: если контекст слишком разросся, сжимаем
         // старую часть истории в одну сводку через сам LLM, прежде чем
         // отправлять следующий запрос. См. `compress_context`.
@@ -574,6 +580,12 @@ impl Agent {
         // DOOM_LOOP_LIMIT раз ПОДРЯД, вызов блокируется с объяснением.
         let mut doom_detector = tool_guard::DoomLoopDetector::new();
         for iteration in 0..self.max_iterations {
+            // ТОЧКА ОТМЕНЫ 1: Esc между итерациями — ход останавливается,
+            // накопленное сохранено (история пишется инкрементально).
+            if interrupt_guard.is_interrupted() {
+                logging_system::info("[interrupt] ход прерван пользователем (Esc)");
+                return "⏹️ Ход прерван (Esc). Часть работы до прерывания сохранена в истории.".to_string();
+            }
             if self.debug {
                 // ИСПРАВЛЕНО: было `eprintln!` — в TUI-режиме (repl.rs,
                 // ratatui + alternate screen) прямая запись в stderr из
@@ -828,6 +840,12 @@ self.monitoring.record_llm_request(self.llm_provider_name, &self.llm_model_name,
             );
 
             if !response.tool_use_blocks.is_empty() {
+                // ТОЧКА ОТМЕНЫ 2: Esc после ответа LLM, но до запуска
+                // инструментов — вызовы не выполняются вовсе.
+                if interrupt_guard.is_interrupted() {
+                    logging_system::info("[interrupt] ход прерван до выполнения инструментов");
+                    return "⏹️ Ход прерван (Esc) до выполнения запрошенных инструментов — ничего не запущено.".to_string();
+                }
                 let tool_calls = response.tool_use_blocks.clone();
 
                 if self.debug {

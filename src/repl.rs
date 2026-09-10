@@ -867,11 +867,23 @@ async fn run_app(
                                 scroll_from_bottom = scroll_from_bottom.saturating_sub(10);
                             }
                             KeyCode::Esc => {
-                                input.clear();
-                                cursor = 0;
-                                history_cursor = None;
-                                sel_anchor = None;
-                                sel_end = None;
+                                // ДВОЙНАЯ РОЛЬ ESC: если агент занят —
+                                // ПРЕРВАТЬ ХОД (как в opencode/CC); иначе —
+                                // очистить ввод/выделение, как раньше.
+                                if busy {
+                                    crate::interrupt::interrupt();
+                                    history.push(HistoryEntry::new(
+                                        Role::System,
+                                        "⏹️ Прерываю ход… (остановка сработает между шагами агента)",
+                                    ));
+                                    scroll_from_bottom = 0;
+                                } else {
+                                    input.clear();
+                                    cursor = 0;
+                                    history_cursor = None;
+                                    sel_anchor = None;
+                                    sel_end = None;
+                                }
                             }
                             _ => {}
                         }
