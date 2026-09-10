@@ -281,6 +281,13 @@ pub struct Agent {
     /// Снапшоты воркспейса (src/snapshots.rs) для /undo: коммит-снимок в
     /// теневом репозитории перед каждым ходом.
     pub snapshots: std::sync::Arc<snapshots::SnapshotManager>,
+    /// SMALL MODEL для служебных задач (сводка контекста, подсказки
+    /// следующих действий) — опционально задаётся в config.toml
+    /// (`small_model = "qwen2.5:3b"`). Если не задана — используется
+    /// основная модель. Зачем: сводка сжимает историю дешёвой моделью,
+    /// основная модель не жжёт контекст/деньги на черновую работу
+    /// (по образцу small_model opencode).
+    pub small_model: Option<String>,
 }
 
 impl Agent {
@@ -350,6 +357,7 @@ impl Agent {
             session,
             recovery_notice,
             snapshots,
+            small_model: None,
         }
     }
 
@@ -396,6 +404,7 @@ impl Agent {
             snapshots: std::sync::Arc::new(snapshots::SnapshotManager::new(
                 std::path::PathBuf::from("/nonexistent"),
             )),
+            small_model: None,
         }
     }
 
@@ -1036,6 +1045,16 @@ self.monitoring.record_llm_request(self.llm_provider_name, &self.llm_model_name,
         self.session.set_id(new_id);
     }
 
+    /// Ленивая фабрика служебного клиента: small_model если задана, иначе
+    /// основной LLMConfig. Вызывается per-use — клиент лёгкий.
+    fn aux_client(&self) -> Box<dyn LLMClient> {
+        let mut cfg = self.llm_config.clone();
+        if let Some(sm) = &self.small_model {
+            cfg.model = sm.clone();
+        }
+        create_llm_client(cfg)
+    }
+
     /// Smart Compression (micro-compaction по образцу Hermes):
     /// - старая часть истории сжимается в одну сводку через LLM,
     /// - ПОЛЬЗОВАТЕЛЬСКИЕ сообщения НЕ СУММАРИЗУЮТСЯ никогда — «то, что вы
@@ -1111,7 +1130,7 @@ self.monitoring.record_llm_request(self.llm_provider_name, &self.llm_model_name,
                 .join("\n\n")
         ));
 
-        match self.llm.complete(&[summary_prompt], Some("Ты помощник, который кратко и точно резюмирует диалоги.")).await {
+        match self.aux_client().complete(&[summary_prompt], Some("Ты помощник, который кратко и точно резюмирует диалоги.")).await {
             Ok(resp) => {
                 let mut messages = self.messages.lock().await;
                 let mut new_messages = vec![LLMMessage {
@@ -1242,7 +1261,7 @@ self.monitoring.record_llm_request(self.llm_provider_name, &self.llm_model_name,
              По-русски, каждое с новой строки, без нумерации, без пояснений.\n\n{convo}"
         ));
         let resp = self
-            .llm
+            .aux_client()
             .complete(&[prompt], Some("Ты генератор коротких подсказок следующих действий"))
             .await
             .ok()?;
@@ -1324,6 +1343,10 @@ async fn main() {
     };
 
     let mut agent = Agent::new(config, true, workdir);
+    // SMALL MODEL (config.toml: small_model = "...") — служебные вызовы
+    // (сводка контекста, подсказки) идут через дешёвую модель, основная
+    // экономит контекст.
+    agent.small_model = agent_config.small_model.clone();
 
     // WATCHDOG (watchdog.rs): std::thread-наблюдатель за живостью
     // рантайма. 15 минут тишины от ВСЕХ тикеров (TUI-отрисовка, Telegram

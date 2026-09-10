@@ -64,6 +64,12 @@ pub struct AgentConfig {
     /// не из чата с LLM.
     #[serde(default)]
     pub work_dir: Option<String>,
+    /// SMALL MODEL для служебных задач (сжатие контекста, подсказки
+    /// следующих действий). Пример: small_model = "qwen2.5:3b" — сводки
+    /// делает дешёвая локальная модель, основная жжёт контекст только
+    /// на полезную работу. None — использовать основную модель.
+    #[serde(default)]
+    pub small_model: Option<String>,
 }
 
 /// Один сохранённый профиль подключения — тот же набор полей, что и
@@ -106,6 +112,7 @@ impl Default for AgentConfig {
             extra_body: None,
             profiles: HashMap::new(),
             work_dir: None,
+            small_model: None,
         }
     }
 }
