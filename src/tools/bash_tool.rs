@@ -1,7 +1,7 @@
 use crate::tools::{Tool, ToolResult};
 use crate::security::{ActionRisk, SecurityValidator};
 use serde_json::Value;
-use std::process::Stdio;
+
 use std::sync::Arc;
 use tokio::process::Command;
 use crate::workdir::WorkDir;
@@ -59,6 +59,11 @@ impl Tool for BashTool {
         if command.is_empty() {
             return ToolResult::error("No command provided");
         }
+
+        // КРОССПЛАТФОРМЕННАЯ ОБОЛОЧКА (shell.rs): bash на Linux/macOS,
+        // pwsh/powershell/cmd на Windows. Синтаксис команд сообщает модели
+        // system_prompt (EnvExtras.shell). Детект — OnceLock, дёшево.
+        let shell = crate::shell::ShellKind::detect();
 
         // Command Validator (аналог command_validator.py): катастрофическое
         // — блокируется БЕЗУСЛОВНО (не спрашиваем никогда). Остальной
@@ -170,26 +175,18 @@ impl Tool for BashTool {
         // закроешь". Для таких команд — как и для /voice и ask_user
         // (см. tty_guard.rs) — временно опускаем TUI и запускаем команду
         // с ПОЛНЫМ (не захваченным) доступом к реальному терминалу.
-        if crate::tty_guard::looks_interactive(command) {
+        // Детект команд посылается по ОБОЛОЧКЕ (shell.rs): sudo нет на
+        // Windows, ssh есть везде.
+        if crate::shell::looks_interactive(shell, command) {
             let wd = self.working_dir.get();
             return run_interactive(command, &wd).await;
         }
 
+        // КРОССПЛАТФОРМЕННАЯ ОБОЛОЧКА (shell.rs): см. detect() выше.
         let cwd = self.working_dir.get();
-        match Command::new("bash")
-            .arg("-c")
-            .arg(command)
-            .current_dir(&cwd)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await
-        {
-            Ok(output) => {
-                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-                if output.status.success() {
+        match crate::shell::run_captured(shell, command, &cwd).await {
+            Ok((success, stdout, stderr)) => {
+                if success {
                     ToolResult::success(stdout)
                 } else {
                     // ИСПРАВЛЕНО (кривые ошибки "[внутренняя ошибка] " без
@@ -202,15 +199,11 @@ impl Tool for BashTool {
                         let tail: String = stdout.trim().chars().rev().take(300).collect();
                         let tail: String = tail.chars().rev().collect();
                         ToolResult::error(format!(
-                            "код выхода {:?}; вывод:\n{}",
-                            output.status.code(),
+                            "код выхода ненулевой; вывод:\n{}",
                             tail
                         ))
                     } else {
-                        ToolResult::error(format!(
-                            "код выхода {:?} (ни stdout, ни stderr)",
-                            output.status.code()
-                        ))
+                        ToolResult::error("код выхода ненулевой (ни stdout, ни stderr)".to_string())
                     }
                 }
             }
@@ -232,13 +225,25 @@ impl Tool for BashTool {
 async fn run_interactive(command: &str, working_dir: &std::path::Path) -> ToolResult {
     let command = command.to_string();
     let working_dir = working_dir.to_path_buf();
+    let shell = crate::shell::ShellKind::detect();
+    let (program, args) = {
+        // spawn_args приватен в shell.rs — дублируем здесь минимально:
+        // интерактивный путь всегда через ту же оболочку.
+        match shell {
+            crate::shell::ShellKind::Bash => ("bash".to_string(), vec!["-c".to_string(), command.clone()]),
+            crate::shell::ShellKind::PowerShell => (
+                "powershell".to_string(),
+                vec!["-NoProfile".to_string(), "-Command".to_string(), command.clone()],
+            ),
+            crate::shell::ShellKind::Cmd => ("cmd".to_string(), vec!["/C".to_string(), command.clone()]),
+        }
+    };
 
     let status = tokio::task::spawn_blocking(move || {
         let label = format!("интерактивная команда — $ {}", command);
         crate::tty_guard::with_real_terminal(&label, || {
-            std::process::Command::new("bash")
-                .arg("-c")
-                .arg(&command)
+            std::process::Command::new(&program)
+                .args(&args)
                 .current_dir(&working_dir)
                 .status()
         })

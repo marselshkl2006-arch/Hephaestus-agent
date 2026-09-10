@@ -60,6 +60,7 @@ mod learning;
  mod tool_guard;
  mod watchdog;
  mod snapshots;
+ mod shell;
 #[cfg(test)]
 mod integration_tests;
 

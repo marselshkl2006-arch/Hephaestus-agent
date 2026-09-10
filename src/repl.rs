@@ -2162,6 +2162,17 @@ fn copy_via_osc52(text: &str) -> &'static str {
         }
     };
 
+    // WINDOWS: powershell Set-Clipboard — нативно, без держателя (Windows
+    // хранит буфер системно, эффект "испарения" — только Wayland/GTK).
+    if cfg!(windows) {
+        let mut ps = Command::new("powershell");
+        ps.args(["-NoProfile", "-Command", "Set-Clipboard -Value $input"]);
+        if feed(ps) {
+            return "powershell";
+        }
+        return "OSC52";
+    }
+
     // 0. GTK через python3-gi. ОСОБЕННОСТЬ KDE/Wayland (наш случай):
     // без живого держателя содержимое буфера ИСПАРЯЕТСЯ после выхода
     // источника — поэтому запускаем отсоединённый процесс-держатель
@@ -2170,7 +2181,7 @@ fn copy_via_osc52(text: &str) -> &'static str {
     // а "пусто через минуту" лечится именно держателем.
     let pid_file = dirs::home_dir()
         .map(|h| h.join(".hephaestus/.clip_holder.pid"))
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/.clip_holder.pid"));
+        .unwrap_or_else(|| std::env::temp_dir().join(".hephaestus-clip-holder.pid"));
     if let Ok(old) = std::fs::read_to_string(&pid_file) {
         if let Ok(pid) = old.trim().parse::<u32>() {
             let _ = Command::new("kill").arg(pid.to_string()).stdout(Stdio::null()).stderr(Stdio::null()).status();

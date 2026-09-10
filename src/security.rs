@@ -44,13 +44,24 @@ pub struct SecurityValidator {
 
 impl SecurityValidator {
     pub fn new() -> Self {
-        let system_paths = vec![
-            "/etc/".to_string(), "/sys/".to_string(), "/proc/".to_string(),
-            "/dev/".to_string(), "/boot/".to_string(), "/bin/".to_string(),
-            "/sbin/".to_string(), "/usr/bin/".to_string(), "/usr/sbin/".to_string(),
-        ];
+        let windows = cfg!(windows);
+        let system_paths: Vec<String> = if windows {
+            vec![
+                "c:\\windows\\".to_string(), "c:\\program files\\".to_string(),
+                "c:\\program files (x86)\\".to_string(), "c:\\boot\\".to_string(),
+            ]
+        } else {
+            vec![
+                "/etc/".to_string(), "/sys/".to_string(), "/proc/".to_string(),
+                "/dev/".to_string(), "/boot/".to_string(), "/bin/".to_string(),
+                "/sbin/".to_string(), "/usr/bin/".to_string(), "/usr/sbin/".to_string(),
+            ]
+        };
 
-        let destructive_patterns: Vec<Regex> = vec![
+        // Деструктивные паттерны: POSIX и Windows наборы объединены —
+        // валидатор один, а команды могут прийти в любой оболочке
+        // (WSL-пути, вызов rm из git-bash и т.п.).
+        let mut destructive_patterns: Vec<Regex> = vec![
             r"\brm\s+-rf\b",
             r"\bdd\b.*if=",
             r"\bmkfs\b",
@@ -59,8 +70,18 @@ impl SecurityValidator {
             r"\bparted\b",
             r":\(\)\{.*\};\s*:",
         ].into_iter().map(|p| Regex::new(p).unwrap()).collect();
+        // WINDOWS: PowerShell/cmd деструктив.
+        destructive_patterns.extend([
+            r"(?i)Remove-Item\s+[^;\n]*-Recurse[^;\n]*-Force",
+            r"(?i)rd\s+/s\s+/q",
+            r"(?i)del\s+/s\s+/q",
+            r"(?i)reg\s+(delete|add)\s+HKLM",
+            r"(?i)bcdedit\s+/set",
+            r"(?i)vssadmin\s+delete\s+shadows",
+            r"(?i)shutdown\s+/[rts]",
+        ].into_iter().map(|p| Regex::new(p).unwrap()));
 
-        let dangerous_patterns: Vec<Regex> = vec![
+        let mut dangerous_patterns: Vec<Regex> = vec![
             // ИСПРАВЛЕНО (жалоба "часто ERROR Bash даже на обычных
             // командах"): было `\brm\b` и `\bmv\b.*\s+/` — ловили
             // АБСОЛЮТНО любое использование `rm`/`mv`, даже безобидное
@@ -80,8 +101,15 @@ impl SecurityValidator {
             r"\bsudo\b",
             r"\bsu\b",
         ].into_iter().map(|p| Regex::new(p).unwrap()).collect();
+        // WINDOWS: потенциально системные операции.
+        dangerous_patterns.extend([
+            r"(?i)Set-ExecutionPolicy",
+            r"(?i)Remove-Item\s+[^;\n]*(C:\\Windows|C:\\Program Files)",
+            r"(?i)net\s+user\s+\S+\s+/delete",
+            r"(?i)taskkill\s+/f\s+/im\s+(explorer|csrss|wininit|svchost)",
+        ].into_iter().map(|p| Regex::new(p).unwrap()));
 
-        let hard_block_patterns: Vec<(Regex, String)> = vec![
+        let mut hard_block_patterns: Vec<(Regex, String)> = vec![
             (r"\brm\s+.*-[a-z]*r[a-z]*f[a-z]*\s+/(\s|$)", "rm -rf на корень файловой системы"),
             (r"\brm\s+.*-[a-z]*r[a-z]*f[a-z]*\s+/\*", "rm -rf на всё содержимое корня"),
             (r"\brm\s+.*-[a-z]*r[a-z]*f[a-z]*\s+(~|\$HOME)(\s|/|$)", "rm -rf на домашнюю папку целиком"),
@@ -93,17 +121,37 @@ impl SecurityValidator {
             (r">\s*/dev/(sd|nvme|hd|vd|xvd)[a-z0-9]*(\s|$)", "запись напрямую в блочное устройство"),
             (r"\bchmod\s+-R\s+777\s+/(\s|$)", "рекурсивный chmod 777 на корень"),
         ].into_iter().map(|(p, r)| (Regex::new(p).unwrap(), r.to_string())).collect();
+        // WINDOWS: безусловные блоки.
+        hard_block_patterns.extend([
+            (r"(?i)Remove-Item\s+[^;\n]*-Recurse[^;\n]*-Force[^;\n]*\s+C:\\(\s|$)", "Remove-Item -Recurse -Force на корень диска C:\\"),
+            (r"(?i)rd\s+/s\s+/q\s+(c:\\|c:$)", "rd /s /q на корень диска"),
+            (r"(?i)diskpart", "diskpart — прямая работа с разделами диска"),
+            (r"(?i)format\s+[a-z]:\s", "форматирование диска"),
+            (r"(?i)cipher\s+/w", "cipher /w — затирание свободного места необратимо"),
+        ].into_iter().map(|(p, r)| (Regex::new(p).unwrap(), r.to_string())));
 
-        let safe_commands = vec![
-            "ls", "cat", "head", "tail", "grep", "find", "pwd", "echo", "date"
-        ].into_iter().map(String::from).collect();
+        let safe_commands: Vec<String> = if windows {
+            vec![
+                "Get-ChildItem", "Get-Content", "Get-Location", "Write-Output", "Get-Date",
+                "Select-String", "Get-Process", "dir", "type", "echo", "cls",
+                "ls", "cat", "grep", "find", "pwd", "date", "git", "cargo",
+            ].into_iter().map(String::from).collect()
+        } else {
+            vec![
+                "ls", "cat", "head", "tail", "grep", "find", "pwd", "echo", "date",
+                "git", "cargo",
+            ].into_iter().map(String::from).collect()
+        };
 
         let sensitive_patterns: Vec<Regex> = vec![
             r"/\.ssh/", r"/\.aws/", r"/\.env$",
             r"password", r"secret", r"token", r"credentials",
             r"id_rsa", r"id_ed25519",
+            // WINDOWS-пути секретов.
+            r"(?i)\\.ssh\\", r"(?i)\\.aws\\", r"(?i)\\.env$",
         ].into_iter().map(|p| Regex::new(p).unwrap()).collect();
 
+        let _ = windows;
         Self {
             system_paths,
             destructive_patterns,

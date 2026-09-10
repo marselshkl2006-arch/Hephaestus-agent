@@ -62,13 +62,29 @@ pub fn build(
 ) -> String {
     let git = workdir.join(".git").exists();
 
+    // КРОССПЛАТФОРМЕННОСТЬ: платформа и оболочка — НЕ заглушка "linux",
+    // а честный детект. На Windows модель получает прямое указание
+    // генерировать PowerShell-синтаксис (и не POSIX-команды).
+    let os_name = if cfg!(windows) { "windows" } else if cfg!(target_os = "macos") { "macos" } else { "linux" };
+    let shell = crate::shell::ShellKind::detect();
     let mut env = format!(
-        "\n\nENVIRONMENT\n- Working directory: {wd}\n- Platform: linux (shell: bash)\n- Provider/model: {prov}/{model}\n- Git repository here: {git}",
+        "\n\nENVIRONMENT\n- Working directory: {wd}\n- Platform: {os_name} (shell: {shell_name})\n- Provider/model: {prov}/{model}\n- Git repository here: {git}",
         wd = workdir.display(),
+        os_name = os_name,
+        shell_name = shell.display_name(),
         prov = provider,
         model = model,
         git = if git { "yes" } else { "no" },
     );
+    if shell == crate::shell::ShellKind::PowerShell {
+        env.push_str(
+            "\n- ВАЖНО: команды выполняются в PowerShell — используй PowerShell-синтаксис (Get-ChildItem, Remove-Item, $env:VAR), НЕ bash-конструкции (rm -rf, export, && работает только в pwsh7)."
+        );
+    } else if shell == crate::shell::ShellKind::Cmd {
+        env.push_str(
+            "\n- ВАЖНО: команды выполняются в cmd.exe — используй cmd-синтаксис (dir, type, del, %VAR%), НЕ bash/PowerShell-конструкции."
+        );
+    }
     if let Some(b) = &extras.git_branch {
         env.push_str(&format!("\n- Git branch: {b}"));
     }

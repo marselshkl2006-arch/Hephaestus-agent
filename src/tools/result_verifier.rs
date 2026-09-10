@@ -55,9 +55,15 @@ impl Tool for VerifyResultTool {
                 }
                 "command_success" => {
                     let command = check.get("command").and_then(|v| v.as_str()).unwrap_or("");
-                    let ok = std::process::Command::new("bash")
-                        .arg("-c")
-                        .arg(command)
+                    // Кроссплатформенно (shell.rs): bash/PowerShell/cmd по ОС.
+                    let shell = crate::shell::ShellKind::detect();
+                    let (program, args) = match shell {
+                        crate::shell::ShellKind::Bash => ("bash".to_string(), vec!["-c".to_string(), command.to_string()]),
+                        crate::shell::ShellKind::PowerShell => ("powershell".to_string(), vec!["-NoProfile".to_string(), "-Command".to_string(), command.to_string()]),
+                        crate::shell::ShellKind::Cmd => ("cmd".to_string(), vec!["/C".to_string(), command.to_string()]),
+                    };
+                    let ok = std::process::Command::new(&program)
+                        .args(&args)
                         .output()
                         .map(|o| o.status.success())
                         .unwrap_or(false);
