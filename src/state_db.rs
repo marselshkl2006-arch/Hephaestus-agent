@@ -83,6 +83,17 @@ CREATE TABLE IF NOT EXISTS tool_calls (
     updated_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id, created_at);
+
+CREATE TABLE IF NOT EXISTS messages_archive (
+    seq          INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id   INTEGER NOT NULL,
+    role         TEXT NOT NULL,
+    content      TEXT NOT NULL,
+    tool_calls   TEXT,
+    tool_call_id TEXT,
+    created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_messages_archive_session ON messages_archive(session_id, seq);
 "#;
 
 /// Строка tool-call для просмотра после рестарта.
@@ -355,6 +366,31 @@ impl StateDb {
             Ok(out)
         });
         rows.unwrap_or_default()
+    }
+
+    /// АРХИВ сжатия: спрятать первые `count` сообщений сессии в
+    /// messages_archive (НИЧЕГО не удаляется — канонический транскрипт
+    /// сохраняется полностью, активная таблица messages остаётся источником
+    /// «живого» контекста). Возвращает число спрятанных строк.
+    pub fn archive_head_messages(&self, session_id: i64, count: usize) -> usize {
+        self.with_conn(|c| {
+            let tx = c.unchecked_transaction()?;
+            let moved = tx.execute(
+                "INSERT INTO messages_archive(session_id, role, content, tool_calls, tool_call_id, created_at)
+                 SELECT session_id, role, content, tool_calls, tool_call_id, created_at
+                 FROM messages WHERE session_id = ?1 ORDER BY seq LIMIT ?2",
+                rusqlite::params![session_id, count as i64],
+            )?;
+            tx.execute(
+                "DELETE FROM messages WHERE seq IN (
+                    SELECT seq FROM messages WHERE session_id = ?1 ORDER BY seq LIMIT ?2
+                )",
+                rusqlite::params![session_id, count as i64],
+            )?;
+            tx.commit()?;
+            Ok(moved)
+        })
+        .unwrap_or(0)
     }
 
     pub fn count_messages(&self, session_id: i64) -> usize {

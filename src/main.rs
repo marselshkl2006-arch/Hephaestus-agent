@@ -1036,14 +1036,16 @@ self.monitoring.record_llm_request(self.llm_provider_name, &self.llm_model_name,
         self.session.set_id(new_id);
     }
 
-    /// Smart Compression: если история диалога разрослась, сжимает старую
-    /// часть в одну сводку через сам LLM (`llm.complete`), оставляя
-    /// последние сообщения как есть. Аналог `smart_compression.py`.
+    /// Smart Compression (micro-compaction по образцу Hermes):
+    /// - старая часть истории сжимается в одну сводку через LLM,
+    /// - ПОЛЬЗОВАТЕЛЬСКИЕ сообщения НЕ СУММАРИЗУЮТСЯ никогда — «то, что вы
+    ///   сказали, — источник истины»; пересказ разрушает намерение. Они
+    ///   остаются в хвосте (переносятся к recent), сжимается только
+    ///   assistant/tool-часть середины,
+    /// - вытесненные сообщения АРХИВИРУЮТСЯ в state.db (messages_archive),
+    ///   ничего не теряется.
     ///
-    /// Пороги простые и намеренно консервативные (по числу сообщений, а не
-    /// по точному счётчику токенов — точный подсчёт токенов зависит от
-    /// конкретной модели и его тут нет): сжимаем, когда сообщений становится
-    /// больше `COMPACT_THRESHOLD`, оставляя последние `KEEP_RECENT` как есть.
+    /// Пороги консервативные: по оценке токенов ИЛИ по числу сообщений.
     pub async fn compress_context_if_needed(&mut self) {
         const COMPACT_THRESHOLD_MSGS: usize = 60;
         // Бюджет в ОЦЕНЁННЫХ токенах: сжимаем, когда контекст подходит к
@@ -1068,7 +1070,11 @@ self.monitoring.record_llm_request(self.llm_provider_name, &self.llm_model_name,
         }
         logging_system::info(&format!("[compress] сжатие контекста: {reason}"));
 
-        let (old_messages, recent_messages) = {
+        // РАЗДЕЛЕНИЕ: старая часть (кандидат на сжатие) и защищённый хвост.
+        // User-сообщения из старой части НЕ сжимаются — они переносятся в
+        // начало хвоста как есть (кратко: пользовательские инструкции живут
+        // дольше пересказов).
+        let (old_messages, mut recent_messages) = {
             let messages = self.messages.lock().await;
             let split = messages.len().saturating_sub(KEEP_RECENT);
             (messages[..split].to_vec(), messages[split..].to_vec())
@@ -1078,11 +1084,27 @@ self.monitoring.record_llm_request(self.llm_provider_name, &self.llm_model_name,
             return;
         }
 
+        let (users_preserved, compressible): (Vec<LLMMessage>, Vec<LLMMessage>) = old_messages
+            .into_iter()
+            .partition(|m| m.role == "user" && m.tool_calls.is_none());
+        let protected_users_count = users_preserved.len();
+
+        // Защищённые user-сообщения идут в начало хвоста (в хронологическом
+        // порядке), сжимается только остальное.
+        let mut protected_tail = users_preserved;
+        protected_tail.append(&mut recent_messages);
+        let recent_messages = protected_tail;
+
+        if compressible.is_empty() {
+            // Сжимать нечего (только user-реплики) — не тратим LLM-вызов.
+            return;
+        }
+
         let summary_prompt = LLMMessage::user(format!(
-            "Сожми следующую историю диалога в краткую сводку (5-8 пунктов): \
-             ключевые решения, установленный контекст, текущее состояние задачи. \
+            "Сожми следующую историю диалога (реплики ассистента и результаты инструментов) в краткую сводку (5-8 пунктов): \
+             ключевые решения, сделанные изменения, текущее состояние задачи. \
              Пиши по-русски, без преамбулы.\n\n---\n{}\n---",
-            old_messages
+            compressible
                 .iter()
                 .map(|m| format!("{}: {}", m.role, m.content))
                 .collect::<Vec<_>>()
@@ -1094,24 +1116,33 @@ self.monitoring.record_llm_request(self.llm_provider_name, &self.llm_model_name,
                 let mut messages = self.messages.lock().await;
                 let mut new_messages = vec![LLMMessage {
                     role: "system".to_string(),
-                    content: format!("[Сжатая сводка предыдущей части диалога]\n{}", resp.content),
+                    content: format!(
+                        "[Сжатая сводка предыдущей части диалога]\n{}\n\n[Реплики пользователя сохранены дословно ниже]",
+                        resp.content
+                    ),
                     tool_calls: None,
                     tool_call_id: None,
                 }];
-                new_messages.extend(recent_messages);
+                new_messages.extend(recent_messages.clone());
                 let compressed_count = new_messages.len();
                 *messages = new_messages.clone();
                 drop(messages);
-                // СИНХРОНИЗАЦИЯ С БД: после сжатия канонический транскрипт
-                // в SQLite перезаписывается тем же набором (сводка + хвост),
-                // иначе resume после краша загрузил бы исходную длинную
-                // историю без сводки (по образцу archive_and_compact Hermes).
+                // СИНХРОНИЗАЦИЯ С БД (по образцу archive_and_compact Hermes):
+                // активная таблица messages перезаписывается сводкой+хвостом,
+                // вытесненные assistant/tool-сообщения уходят в messages_archive
+                // — канонический транскрипт не теряется, resume после краша
+                // согласован с памятью.
                 self.session.replace_messages(&new_messages);
+                let archived = self
+                    .state
+                    .archive_head_messages(self.session.id(), compressible.len());
                 if self.debug {
                     logging_system::debug(&format!(
-                        "Контекст сжат: было {} сообщений, стало {}",
-                        old_messages.len() + KEEP_RECENT,
-                        compressed_count
+                        "Контекст сжат: было {} сообщений, стало {} (user-реплик защищено: {}, заархивировано в БД: {})",
+                        compressed_count + archived,
+                        compressed_count,
+                        protected_users_count,
+                        archived
                     ));
                 }
             }
