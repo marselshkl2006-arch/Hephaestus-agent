@@ -1495,6 +1495,7 @@ async fn handle_command(
                     "  /mcp reload    — перечитать ~/.hephaestus/mcp.toml и переподключить",
                     "  /stats         — статистика (токены, вызовы LLM/инструментов)",
                     "  /toolcalls     — журнал вызовов инструментов сессии (статусы, ошибки)",
+                    "  /sessions      — список сессий; /sessions open N — открыть; /sessions find <текст> — поиск по всем",
                     "  /compress      — принудительно сжать контекст диалога",
                     "  /exit, /quit   — выход",
                     "",
@@ -1599,8 +1600,95 @@ async fn handle_command(
                 history.push(HistoryEntry::new(Role::System, "Агент занят — попробуйте ещё раз чуть позже."));
             }
         }
-        "memory" => {
-            // /memory            — список стейдж-записей фоновых задач
+        "sessions" => {
+            // /sessions              — список сессий
+            // /sessions open N       — переключиться на сессию #N
+            // /sessions find <текст> — полнотекстовый поиск по всем сессиям
+            let args_str = cmd.strip_prefix("sessions ").unwrap_or("");
+            let rest: Vec<&str> = args_str.split_whitespace().collect();
+            if busy {
+                history.push(HistoryEntry::new(Role::System, "Нельзя переключать сессии, пока агент отвечает."));
+                return false;
+            }
+            match rest.first().map(|s| *s) {
+                None => {
+                    if let Ok(a) = agent.try_lock() {
+                        let list = a.state.list_sessions(20);
+                        let cur = a.session_id();
+                        let mut lines = vec![format!("Сессии (текущая #{cur}):")];
+                        for s in &list {
+                            let mark = if s.id == cur { "→" } else { " " };
+                            let title = crate::truncate_chars(&s.title, 60);
+                            lines.push(format!(
+                                "  {} #{:<4} {} — {} сообщ. — {}/{} — {}",
+                                mark, s.id, s.updated_at.get(0..16).unwrap_or(""), s.message_count, s.provider, s.model, title
+                            ));
+                        }
+                        lines.push(String::new());
+                        lines.push("Открыть: /sessions open <номер>  Поиск: /sessions find <текст>".to_string());
+                        history.push(HistoryEntry::new(Role::System, lines.join("\n")));
+                    } else {
+                        history.push(HistoryEntry::new(Role::System, "Агент занят — попробуйте ещё раз чуть позже."));
+                    }
+                }
+                Some("find") => {
+                    let query = args_str.strip_prefix("find ").unwrap_or("").trim();
+                    if query.is_empty() {
+                        history.push(HistoryEntry::new(Role::Error, "Формат: /sessions find <текст>"));
+                    } else if let Ok(a) = agent.try_lock() {
+                        let hits = a.state.search_sessions(query, 10);
+                        if hits.is_empty() {
+                            history.push(HistoryEntry::new(Role::System, format!("По запросу '{query}' ничего не найдено.")));
+                        } else {
+                            let list = a.state.list_sessions(50);
+                            let mut lines = vec![format!("Найдено в {} сессиях:", hits.len())];
+                            for (sid, count) in &hits {
+                                let title = list
+                                    .iter()
+                                    .find(|s| s.id == *sid)
+                                    .map(|s| crate::truncate_chars(&s.title, 50))
+                                    .unwrap_or_default();
+                                lines.push(format!("  #{sid} — {count} совпад. — {title}"));
+                            }
+                            lines.push("Открыть: /sessions open <номер>".to_string());
+                            history.push(HistoryEntry::new(Role::System, lines.join("\n")));
+                        }
+                    } else {
+                        history.push(HistoryEntry::new(Role::System, "Агент занят — попробуйте ещё раз чуть позже."));
+                    }
+                }
+                Some("open") => {
+                    let Some(n) = rest.get(1).and_then(|s| s.parse::<i64>().ok()) else {
+                        history.push(HistoryEntry::new(Role::Error, "Формат: /sessions open <номер>"));
+                        return false;
+                    };
+                    if let Ok(mut a) = agent.try_lock() {
+                        if !a.state.switch_to(n) {
+                            history.push(HistoryEntry::new(Role::Error, format!("Сессии #{n} не существует (см. /sessions)")));
+                            return false;
+                        }
+                        let msgs = a.state.load_messages(n);
+                        let count = msgs.len();
+                        a.session.set_id(n);
+                        a.load_messages(msgs).await;
+                        let restored = a.state.load_messages(n);
+                        for msg in &restored {
+                            history.push(HistoryEntry::new(llm_role_to_repl_role(&msg.role), msg.content.clone()));
+                        }
+                        history.push(HistoryEntry::new(
+                            Role::System,
+                            format!("── Открыта сессия #{n}: {count} сообщений — продолжаем ──"),
+                        ));
+                    } else {
+                        history.push(HistoryEntry::new(Role::System, "Агент занят — попробуйте ещё раз чуть позже."));
+                    }
+                }
+                Some(other) => {
+                    history.push(HistoryEntry::new(Role::Error, format!("Неизвестное действие /sessions {other}. Доступно: (пусто), open N, find <текст>")));
+                }
+            }
+        }
+        "memory" => {            // /memory            — список стейдж-записей фоновых задач
             // /memory approve N  — перенести запись N в постоянную память
             // /memory reject N   — отклонить
             let args_str = cmd.strip_prefix("memory ").unwrap_or("");

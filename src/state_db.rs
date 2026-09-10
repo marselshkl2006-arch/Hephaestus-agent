@@ -104,6 +104,18 @@ CREATE TABLE IF NOT EXISTS permission_log (
     source  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_permission_log_ts ON permission_log(ts);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
+    content,
+    content='messages',
+    content_rowid='seq'
+);
+CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
+    INSERT INTO sessions_fts(rowid, content) VALUES (new.seq, new.content);
+END;
+CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+    INSERT INTO sessions_fts(sessions_fts, rowid, content) VALUES ('delete', old.seq, old.content);
+END;
 "#;
 
 /// Строка tool-call для просмотра после рестарта.
@@ -114,6 +126,18 @@ pub struct ToolCallRow {
     pub status: String,
     pub duration_ms: Option<f64>,
     pub error: Option<String>,
+}
+
+/// Краткая сводка сессии для /sessions.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionSummary {
+    pub id: i64,
+    pub created_at: String,
+    pub updated_at: String,
+    pub provider: String,
+    pub model: String,
+    pub message_count: usize,
+    pub title: String,
 }
 
 pub struct StateDb {
@@ -297,6 +321,79 @@ impl StateDb {
                 rusqlite::params![session_id, pending as i64],
             )
         });
+    }
+
+    // ── Множественные сессии (по образцу opencode --continue / --fork) ──
+
+    /// Список сессий (свежие сверху): id, updated_at, provider/model,
+    /// число сообщений, первые ~80 символов первого user-сообщения как
+    /// заголовок. limit по умолчанию 20.
+    pub fn list_sessions(&self, limit: usize) -> Vec<SessionSummary> {
+        self.with_conn(|c| {
+            let mut stmt = c.prepare(
+                "SELECT s.id, s.created_at, s.updated_at, COALESCE(s.provider,''), COALESCE(s.model,''),
+                        (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id),
+                        COALESCE((SELECT SUBSTR(m.content, 1, 80) FROM messages m
+                                  WHERE m.session_id = s.id AND m.role = 'user' ORDER BY m.seq LIMIT 1), '')
+                 FROM sessions s ORDER BY s.updated_at DESC LIMIT ?1",
+            )?;
+            let it = stmt.query_map(rusqlite::params![limit as i64], |r| {
+                Ok(SessionSummary {
+                    id: r.get(0)?,
+                    created_at: r.get(1)?,
+                    updated_at: r.get(2)?,
+                    provider: r.get(3)?,
+                    model: r.get(4)?,
+                    message_count: r.get::<_, i64>(5)? as usize,
+                    title: r.get(6)?,
+                })
+            })?;
+            let mut out = Vec::new();
+            for row in it {
+                out.push(row.map_err(rusqlite::Error::from)?);
+            }
+            Ok(out)
+        })
+        .unwrap_or_default()
+    }
+
+    /// FTS-поиск по ВСЕМ сессиям (полнотекстовый, как в opencode): какие
+    /// сессии содержат упоминание и по сколько совпадений.
+    pub fn search_sessions(&self, query: &str, limit: usize) -> Vec<(i64, usize)> {
+        // Экранируем кавычки, чтобы запрос был валидным FTS-выражением.
+        let safe = query.replace('"', "\"\"");
+        let fts_query = format!("\"{}\"", safe);
+        self.with_conn(|c| {
+            let mut stmt = c.prepare(
+                "SELECT m.session_id, COUNT(*) FROM sessions_fts f
+                 JOIN messages m ON m.seq = f.rowid
+                 WHERE sessions_fts MATCH ?1
+                 GROUP BY m.session_id ORDER BY COUNT(*) DESC LIMIT ?2",
+            )?;
+            let it = stmt.query_map(rusqlite::params![fts_query, limit as i64], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? as usize))
+            })?;
+            let mut out = Vec::new();
+            for row in it {
+                out.push(row.map_err(rusqlite::Error::from)?);
+            }
+            Ok(out)
+        })
+        .unwrap_or_default()
+    }
+
+    /// Загрузить сообщения ЛЮБОЙ сессии по id (для /sessions open N) и
+    /// сделать её текущей — продолжение старого диалога.
+    pub fn switch_to(&self, session_id: i64) -> bool {
+        let exists = self.with_conn(|c| {
+            c.query_row(
+                "SELECT 1 FROM sessions WHERE id = ?1",
+                rusqlite::params![session_id],
+                |_| Ok(()),
+            )
+            .optional()
+        });
+        matches!(exists, Some(Some(())))
     }
 
     /// Время последнего обновления сессии (для «восстановлена сессия от …»).

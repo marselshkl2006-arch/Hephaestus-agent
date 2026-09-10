@@ -3,7 +3,6 @@ use crate::security::{ActionRisk, SecurityValidator};
 use serde_json::Value;
 
 use std::sync::Arc;
-use tokio::process::Command;
 use crate::workdir::WorkDir;
 use crate::permissions::{PermissionManager, Outcome, PermissionEngine, RuleAction};
 

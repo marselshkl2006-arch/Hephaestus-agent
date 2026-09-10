@@ -401,6 +401,63 @@ mod atomic_files_integration {
 }
 
 #[cfg(test)]
+mod multi_session_integration {
+    use crate::state_db::StateDb;
+    use crate::llm::LLMMessage;
+
+    fn fresh_db() -> StateDb {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        StateDb::build_pub(conn, std::path::PathBuf::from(":memory:")).unwrap()
+    }
+
+    /// Сквозной сценарий: две сессии → список (свежие сверху) → FTS-поиск
+    /// находит только нужную → switch_to открывает старую с её контентом.
+    #[test]
+    fn list_search_and_switch() {
+        let db = fresh_db();
+
+        // Сессия 1: про выпечку.
+        let s1 = db.new_session("ollama", "m");
+        db.append_message(s1, &LLMMessage::user("как испечь хлеб на закваске".into()));
+        db.append_message(s1, &LLMMessage::assistant("Рецепт: мука, вода, соль...".into()));
+
+        // Сессия 2 (свежее): про Rust.
+        let s2 = db.new_session("ollama", "m");
+        db.append_message(s2, &LLMMessage::user("объясни lifetime в rust".into()));
+
+        let list = db.list_sessions(10);
+        assert_eq!(list.len(), 2, "обе сессии в списке");
+        assert_eq!(list[0].id, s2, "свежая сверху");
+        assert_eq!(list[0].title, "объясни lifetime в rust");
+        assert_eq!(list[1].message_count, 2);
+
+        // FTS-поиск: слово из сессии 1.
+        let hits = db.search_sessions("закваске", 10);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0, s1);
+        assert_eq!(hits[0].1, 1);
+
+        // Переключение: открываем старую сессию — контент на месте.
+        assert!(db.switch_to(s1));
+        let restored = db.load_messages(s1);
+        assert_eq!(restored.len(), 2);
+        assert!(restored[0].content.contains("хлеб"));
+        assert!(!db.switch_to(9999), "несуществующая сессия — false");
+    }
+
+    #[test]
+    fn search_empty_and_quoted_input_safe() {
+        let db = fresh_db();
+        let s = db.new_session("ollama", "m");
+        db.append_message(s, &LLMMessage::user("текст с кавычками \"внутри\"".into()));
+        assert!(db.search_sessions("неттакогослова", 5).is_empty());
+        // Кавычки в запросе не ломают FTS-синтаксис.
+        let hits = db.search_sessions("кавычками", 5);
+        assert_eq!(hits.len(), 1);
+    }
+}
+
+#[cfg(test)]
 mod memory_staging_integration {
     use crate::memory_tools;
     use crate::tools::Tool;

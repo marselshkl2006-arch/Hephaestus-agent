@@ -169,7 +169,7 @@ impl SnapshotManager {
     /// файлы — удалить. Возвращает человекочитаемый отчёт.
     pub fn undo_last(&self) -> Result<String, String> {
         self.check_available()?;
-        let point = {
+        let _point = {
             let mut last = self.last.lock().map_err(|_| "лок занят".to_string())?;
             last.pop().ok_or_else(|| "нет снимков для отката (этот ход уже откачен или снимков не было)".to_string())?
         };
