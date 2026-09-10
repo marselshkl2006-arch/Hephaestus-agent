@@ -37,6 +37,15 @@ crossterm = { version = "0.28", features = ["event-stream"] }
 # Базы данных
 rusqlite = { version = "0.31", features = ["bundled"] }
 
+# Универсальный db_* (db_universal.rs): ЕДИНЫЙ API для SQLite+PostgreSQL+MySQL
+# через sqlx (чистый Rust, TLS — rustls, без системных libpq) + Redis.
+# MongoDB — намеренно НЕ встроен (документная модель — другой API, тяжёлый
+# крейт): подключается MCP-сервером (~/.hephaestus/mcp.toml) или скиллом.
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio-rustls", "any", "sqlite", "postgres", "mysql", "json",
+] }
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager", "json"] }
+
 # Генерация DOCX/ODT/XLSX — это просто ZIP с XML внутри
 zip = "2"
 

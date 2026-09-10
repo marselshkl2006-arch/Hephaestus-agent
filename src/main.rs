@@ -314,6 +314,17 @@ impl Agent {
         workdir: workdir::WorkDir,
         permission_rules: Vec<permissions::RuleConfig>,
     ) -> Self {
+        Self::new_full(config, auto_approve, workdir, permission_rules, None)
+    }
+
+    /// Полная фабрика: правила разрешений + БД-подключения из config.toml.
+    pub fn new_full(
+        config: LLMConfig,
+        auto_approve: bool,
+        workdir: workdir::WorkDir,
+        permission_rules: Vec<permissions::RuleConfig>,
+        databases: Option<tools::db_universal::DbConnections>,
+    ) -> Self {
         let monitoring = Arc::new(monitoring::MonitoringSystem::new());
         let permissions = Arc::new(permissions::PermissionManager::new());
         // ДВИЖОК ПРАВИЛ (permissions-as-data): дефолты (.env/ключи → ask)
@@ -321,6 +332,8 @@ impl Agent {
         // ниже, когда открыта state.db.
         let engine = Arc::new(permissions::PermissionEngine::new(permission_rules));
         permissions.set_engine(engine.clone());
+        // БД-подключения ([databases.NAME] из config.toml) или пустой набор.
+        let databases = Arc::new(databases.unwrap_or_else(tools::db_universal::DbConnections::empty));
         let todos = Arc::new(todo_tools::TodoBoard::new());
         let llm_config = config.clone();
         // Суб-агенты: фабрика создаётся здесь, чтобы ToolsEnv мог
@@ -335,6 +348,7 @@ impl Agent {
             monitoring: monitoring.clone(),
             permissions: permissions.clone(),
             engine: engine.clone(),
+            databases: databases.clone(),
             todos: todos.clone(),
             llm_config: llm_config.clone(),
             subagents: subagents.clone(),
@@ -1394,7 +1408,13 @@ async fn main() {
         None => workdir::WorkDir::from_cwd(),
     };
 
-    let mut agent = Agent::new_with_rules(config, true, workdir, agent_config.permissions.clone());
+    let mut agent = Agent::new_full(
+        config,
+        true,
+        workdir,
+        agent_config.permissions.clone(),
+        Some(tools::db_universal::DbConnections::new(agent_config.databases.clone())),
+    );
     // SMALL MODEL (config.toml: small_model = "...") — служебные вызовы
     // (сводка контекста, подсказки) идут через дешёвую модель, основная
     // экономит контекст.

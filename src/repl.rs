@@ -2273,6 +2273,14 @@ fn copy_via_osc52(text: &str) -> &'static str {
         return "OSC52";
     }
 
+    // MACOS: pbcopy — системный, буфер системный (нет эффекта испарения).
+    if cfg!(target_os = "macos") {
+        if feed(Command::new("pbcopy")) {
+            return "pbcopy";
+        }
+        return "OSC52";
+    }
+
     // 0. GTK через python3-gi. ОСОБЕННОСТЬ KDE/Wayland (наш случай):
     // без живого держателя содержимое буфера ИСПАРЯЕТСЯ после выхода
     // источника — поэтому запускаем отсоединённый процесс-держатель

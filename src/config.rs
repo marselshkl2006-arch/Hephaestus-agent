@@ -81,6 +81,16 @@ pub struct AgentConfig {
     /// Поверх встроенных дефолтов (защита .env/ключей → ask).
     #[serde(default)]
     pub permissions: Vec<crate::permissions::RuleConfig>,
+    /// УНИВЕРСАЛЬНЫЕ БД (db_universal.rs): подключения для db_query
+    /// (sqlite/postgres/mysql через sqlx) и db_redis. Секреты — через
+    /// {env:VAR} в url, не в конфиге:
+    ///
+    ///   [databases.prod]
+    ///   url = "postgres://app:{env:PG_PASSWORD}@10.0.0.5/appdb"
+    ///   read_only = true
+    ///   description = "прод, только чтение"
+    #[serde(default)]
+    pub databases: HashMap<String, crate::tools::db_universal::DatabaseConfig>,
 }
 
 /// Один сохранённый профиль подключения — тот же набор полей, что и
@@ -125,6 +135,7 @@ impl Default for AgentConfig {
             work_dir: None,
             small_model: None,
             permissions: Vec::new(),
+            databases: HashMap::new(),
         }
     }
 }

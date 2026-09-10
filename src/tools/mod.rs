@@ -23,6 +23,7 @@ pub mod doc_generator;
 pub mod subagent;
 pub mod md_skills;
 pub mod search_tools;
+pub mod db_universal;
 
 use file_tools::*;
 use bash_tool::BashTool;
@@ -292,6 +293,9 @@ pub struct ToolsEnv {
     /// Движок декларативных правил (permissions-as-data): allow/ask/deny
     /// по glob-паттернам из config.toml + правила сессии. См. permissions.rs.
     pub engine: Arc<crate::permissions::PermissionEngine>,
+    /// Универсальные БД-подключения ([databases.NAME] из config.toml) —
+    /// для db_query/db_redis/db_connections (db_universal.rs).
+    pub databases: Arc<db_universal::DbConnections>,
     /// Общий план задачи: ОДИН экземпляр на Agent и инструменты
     /// (todo_write пишет его, подсказка в system prompt читает).
     pub todos: Arc<crate::todo_tools::TodoBoard>,
@@ -311,7 +315,7 @@ pub struct ToolsEnv {
 /// `env.permissions` — подтверждения опасных действий как в opencode
 /// ("один раз / всегда / нет"): см. src/permissions.rs.
 pub fn create_tools(env: ToolsEnv) -> SharedToolRegistry {
-    let ToolsEnv { workdir, monitoring, permissions, engine, todos, llm_config: _, subagents } = env;
+    let ToolsEnv { workdir, monitoring, permissions, engine, databases, todos, llm_config: _, subagents } = env;
     let registry = ToolRegistry::new();
 
     let cache = FileCache::default();
@@ -330,6 +334,12 @@ pub fn create_tools(env: ToolsEnv) -> SharedToolRegistry {
     registry.register("grep", Arc::new(search_tools::GrepTool::new(workdir.clone())));
     registry.register("bash", Arc::new(BashTool::new(workdir.clone(), permissions.clone(), engine.clone())));
     registry.register("git", Arc::new(GitTool::new(workdir.clone())));
+
+    // Универсальные БД (db_universal.rs): db_query (sqlite/pg/mysql),
+    // db_redis, db_connections. Сами подключения — из config.toml.
+    for (name, tool) in db_universal::create_db_tools(databases.clone(), permissions.clone(), engine.clone()) {
+        registry.register(name, tool);
+    }
 
     // План задачи агента (todo_write/todo_read) — общий список с Agent.
     registry.register("todo_write", Arc::new(crate::todo_tools::TodoWriteTool::new(todos.clone())));
