@@ -289,6 +289,9 @@ pub struct ToolsEnv {
     pub workdir: crate::workdir::WorkDir,
     pub monitoring: Arc<crate::monitoring::MonitoringSystem>,
     pub permissions: Arc<crate::permissions::PermissionManager>,
+    /// Движок декларативных правил (permissions-as-data): allow/ask/deny
+    /// по glob-паттернам из config.toml + правила сессии. См. permissions.rs.
+    pub engine: Arc<crate::permissions::PermissionEngine>,
     /// Общий план задачи: ОДИН экземпляр на Agent и инструменты
     /// (todo_write пишет его, подсказка в system prompt читает).
     pub todos: Arc<crate::todo_tools::TodoBoard>,
@@ -308,14 +311,14 @@ pub struct ToolsEnv {
 /// `env.permissions` — подтверждения опасных действий как в opencode
 /// ("один раз / всегда / нет"): см. src/permissions.rs.
 pub fn create_tools(env: ToolsEnv) -> SharedToolRegistry {
-    let ToolsEnv { workdir, monitoring, permissions, todos, llm_config: _, subagents } = env;
+    let ToolsEnv { workdir, monitoring, permissions, engine, todos, llm_config: _, subagents } = env;
     let registry = ToolRegistry::new();
 
     let cache = FileCache::default();
-    registry.register("file_read", Arc::new(FileReadTool::with_cache(cache, workdir.clone())));
-    registry.register("file_write", Arc::new(FileWriteTool::new(workdir.clone())));
-    registry.register("file_edit", Arc::new(FileEditTool::new(workdir.clone())));
-    registry.register("file_delete", Arc::new(FileDeleteTool::new(workdir.clone(), permissions.clone())));
+    registry.register("file_read", Arc::new(FileReadTool::with_cache(cache.clone(), workdir.clone(), engine.clone(), permissions.clone())));
+    registry.register("file_write", Arc::new(FileWriteTool::new(workdir.clone(), engine.clone())));
+    registry.register("file_edit", Arc::new(FileEditTool::with_cache(cache.clone(), workdir.clone(), engine.clone())));
+    registry.register("file_delete", Arc::new(FileDeleteTool::new(workdir.clone(), permissions.clone(), engine.clone())));
     registry.register("file_move", Arc::new(FileMoveTool::new(workdir.clone())));
     registry.register("file_copy", Arc::new(FileCopyTool::new(workdir.clone())));
     registry.register("file_exists", Arc::new(FileExistsTool::new(workdir.clone())));
@@ -325,7 +328,7 @@ pub fn create_tools(env: ToolsEnv) -> SharedToolRegistry {
     // grep — поиск по содержимому как инструмент первого класса
     // (раньше модель была вынуждена гонять bash-grep).
     registry.register("grep", Arc::new(search_tools::GrepTool::new(workdir.clone())));
-    registry.register("bash", Arc::new(BashTool::new(workdir.clone(), permissions.clone())));
+    registry.register("bash", Arc::new(BashTool::new(workdir.clone(), permissions.clone(), engine.clone())));
     registry.register("git", Arc::new(GitTool::new(workdir.clone())));
 
     // План задачи агента (todo_write/todo_read) — общий список с Agent.

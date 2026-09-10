@@ -70,6 +70,17 @@ pub struct AgentConfig {
     /// на полезную работу. None — использовать основную модель.
     #[serde(default)]
     pub small_model: Option<String>,
+    /// PERMISSIONS-AS-DATA: декларативные правила разрешений, решают без
+    /// вопроса человеку. Порядок = приоритет, последнее совпадение выигрывает:
+    ///
+    ///   [[permissions.rules]]
+    ///   tool = "bash"        # bash | edit | read | delete | *
+    ///   pattern = "git *"    # glob по команде/пути
+    ///   action = "allow"     # allow | ask | deny
+    ///
+    /// Поверх встроенных дефолтов (защита .env/ключей → ask).
+    #[serde(default)]
+    pub permissions: Vec<crate::permissions::RuleConfig>,
 }
 
 /// Один сохранённый профиль подключения — тот же набор полей, что и
@@ -113,6 +124,7 @@ impl Default for AgentConfig {
             profiles: HashMap::new(),
             work_dir: None,
             small_model: None,
+            permissions: Vec::new(),
         }
     }
 }

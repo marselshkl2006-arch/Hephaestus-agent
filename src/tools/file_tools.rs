@@ -155,16 +155,77 @@ pub struct FileReadTool {
     max_file_size: u64,
     cache: FileCache,
     workdir: WorkDir,
+    /// Правила разрешений: .env/ключи → ask по дефолту, deny/allow из конфига.
+    engine: std::sync::Arc<crate::permissions::PermissionEngine>,
+    /// Канал вопросов для ask-правил (None — ask = отказ с объяснением).
+    permissions: Option<std::sync::Arc<crate::permissions::PermissionManager>>,
 }
 
 impl FileReadTool {
     pub fn new(workdir: WorkDir) -> Self {
-        Self { max_file_size: 10 * 1024 * 1024, cache: FileCache::default(), workdir }
+        Self {
+            max_file_size: 10 * 1024 * 1024,
+            cache: FileCache::default(),
+            workdir,
+            engine: std::sync::Arc::new(crate::permissions::PermissionEngine::new(vec![])),
+            permissions: None,
+        }
     }
 
-    pub fn with_cache(cache: FileCache, workdir: WorkDir) -> Self {
-        Self { max_file_size: 10 * 1024 * 1024, cache, workdir }
+    pub fn with_cache(
+        cache: FileCache,
+        workdir: WorkDir,
+        engine: std::sync::Arc<crate::permissions::PermissionEngine>,
+        permissions: std::sync::Arc<crate::permissions::PermissionManager>,
+    ) -> Self {
+        Self { max_file_size: 10 * 1024 * 1024, cache, workdir, engine, permissions: Some(permissions) }
     }
+}
+
+/// Общий хелпер: решить судьбу файловой операции по правилам движка.
+/// Deny → Err(сообщение); Ask → запрос человеку через permissions;
+/// Allow/None → Ok(()).
+async fn guard_file_op(
+    engine: &std::sync::Arc<crate::permissions::PermissionEngine>,
+    permissions: Option<&std::sync::Arc<crate::permissions::PermissionManager>>,
+    tool: &str,
+    display_path: &str,
+    key: &str,
+) -> Result<(), String> {
+    use crate::permissions::{Outcome, RuleAction};
+    match engine.evaluate(tool, key) {
+        Some(RuleAction::Deny) => {
+            Err(format!(
+                "🚫 Операция '{tool}' над '{display_path}' запрещена правилом разрешений (config.toml [[permissions.rules]])."
+            ))
+        }
+        Some(RuleAction::Ask) => {
+            let Some(pm) = permissions else {
+                return Err(format!(
+                    "🚫 '{tool}' над '{display_path}' требует подтверждения, но канал вопросов недоступен — отменено."
+                ));
+            };
+            match pm.request(tool, &format!("{tool}: {display_path}"), "файл помечен правилом как чувствительный (ask)", key).await {
+                Outcome::Granted => Ok(()),
+                Outcome::Denied => Err(format!(
+                    "🚫 Пользователь ОТКЛОНИЛ {tool} над {display_path}. Уточни, как действовать."
+                )),
+                Outcome::Expired => Err(format!(
+                    "⏳ Нет ответа на запрос {tool} за 3 минуты — отменено ({display_path})."
+                )),
+            }
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Ключ для правил по файлу: относительный путь (если внутри workdir),
+/// иначе полный — glob-паттерны вида **/.env матчятся на оба.
+fn permission_key(workdir: &WorkDir, path: &std::path::Path) -> String {
+    let wd = workdir.get();
+    path.strip_prefix(&wd)
+        .map(|r| r.to_string_lossy().to_string())
+        .unwrap_or_else(|_| path.to_string_lossy().to_string())
 }
 
 #[async_trait]
@@ -208,6 +269,12 @@ impl Tool for FileReadTool {
 
         if !path.is_file() {
             return ToolResult::error(format!("Not a file: {}", file_path));
+        }
+
+        // PERMISSIONS-AS-DATA: .env/ключи → ask по дефолту, deny из конфига.
+        let pkey = permission_key(&self.workdir, &path);
+        if let Err(e) = guard_file_op(&self.engine, self.permissions.as_ref(), "read", &pkey, &pkey).await {
+            return ToolResult::error(e);
         }
 
         let metadata = match fs::metadata(&path) {
@@ -273,12 +340,32 @@ impl Tool for FileReadTool {
 
 pub struct FileWriteTool {
     workdir: WorkDir,
+    engine: std::sync::Arc<crate::permissions::PermissionEngine>,
 }
 
 impl FileWriteTool {
-    pub fn new(workdir: WorkDir) -> Self {
-        Self { workdir }
+    pub fn new(workdir: WorkDir, engine: std::sync::Arc<crate::permissions::PermissionEngine>) -> Self {
+        Self { workdir, engine }
     }
+}
+
+/// АТОМАРНАЯ ЗАПИСЬ: пишем во временный файл РЯДОМ (тот же каталог —
+/// rename внутри одной ФС атомарен) и переименовываем. Краш процесса
+/// посреди записи больше НЕ портит файл пользователя: либо старая версия,
+/// либо новая целиком, никогда — обрезанная половина.
+async fn atomic_write(path: &std::path::Path, content: &[u8]) -> Result<(), String> {
+    let stem = path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "file".into());
+    let tmp = path.with_file_name(format!(".{stem}.hef-tmp-{}", std::process::id()));
+    let write_res = tokio_fs::write(&tmp, content).await;
+    if let Err(e) = write_res {
+        let _ = tokio_fs::remove_file(&tmp).await;
+        return Err(format!("tmp write: {e}"));
+    }
+    if let Err(e) = tokio_fs::rename(&tmp, path).await {
+        let _ = tokio_fs::remove_file(&tmp).await;
+        return Err(format!("rename (атомарная подмена): {e}"));
+    }
+    Ok(())
 }
 
 #[async_trait]
@@ -319,11 +406,17 @@ impl Tool for FileWriteTool {
             }
         }
 
+        // PERMISSIONS-AS-DATA: .env/ключи → ask, deny из конфига.
+        let pkey = permission_key(&self.workdir, &path);
+        if let Err(e) = guard_file_op(&self.engine, None, "edit", &pkey, &pkey).await {
+            return ToolResult::error(e);
+        }
+
         // ДИФФ вместо немого перезаписи: если файл существовал — показываем
         // что именно поменялось (+/− по строкам). Модель и человек сразу
         // видят результат правки, а не догадываются.
         let prev = tokio_fs::read_to_string(&path).await.ok();
-        match tokio_fs::write(&path, content.as_bytes()).await {
+        match atomic_write(&path, content.as_bytes()).await {
             Ok(_) => {
                 let diff_note = match prev {
                     Some(prev) => match unified_diff(&prev, content, 40) {
@@ -353,11 +446,25 @@ impl Tool for FileWriteTool {
 
 pub struct FileEditTool {
     workdir: WorkDir,
+    cache: FileCache,
+    engine: std::sync::Arc<crate::permissions::PermissionEngine>,
 }
 
 impl FileEditTool {
     pub fn new(workdir: WorkDir) -> Self {
-        Self { workdir }
+        Self {
+            workdir,
+            cache: FileCache::default(),
+            engine: std::sync::Arc::new(crate::permissions::PermissionEngine::new(vec![])),
+        }
+    }
+
+    pub fn with_cache(
+        cache: FileCache,
+        workdir: WorkDir,
+        engine: std::sync::Arc<crate::permissions::PermissionEngine>,
+    ) -> Self {
+        Self { cache, workdir, engine }
     }
 }
 
@@ -378,14 +485,39 @@ impl Tool for FileEditTool {
             return ToolResult::error("Missing required parameters: file_path and old_text");
         }
 
-        // Read the file
-        let read_tool = FileReadTool::new(self.workdir.clone());
-        let read_result = read_tool.execute(&serde_json::json!({ "file_path": file_path })).await;
-        if !read_result.success {
-            return read_result;
+        let path = self.workdir.resolve(file_path);
+
+        // PERMISSIONS-AS-DATA: .env/ключи → ask, deny из конфига.
+        let pkey = permission_key(&self.workdir, &path);
+        if let Err(e) = guard_file_op(&self.engine, None, "edit", &pkey, &pkey).await {
+            return ToolResult::error(e);
         }
 
-        let content = read_result.output;
+        // ЧИТАЕМ НАПРЯМУЮ (не через file_read): edit должен работать с
+        // ПОЛНЫМ содержимым — пагинация file_read обрезала бы большие
+        // файлы, и edit построенный по обрезанной версии уничтожил бы
+        // весь хвост.
+        let content = match tokio_fs::read_to_string(&path).await {
+            Ok(c) => c,
+            Err(e) => return ToolResult::error(format!("Не удалось прочитать файл (нужен file_read первым?): {e}")),
+        };
+
+        // FRESHNESS CHECK (по образцу opencode/CC): если файл был прочитан
+        // file_read-ом и С ТЕХ ПОР изменился на диске (пользователь правил
+        // вручную, git checkout и т.п.) — edit затер бы чужие правки.
+        // Кэш хранит (mtime, content) на момент чтения; mtime разошёлся —
+        // честный отказ с требованием перечитать.
+        if let Some((cached_mtime, cached_content)) = self.cache.peek_cached(&path) {
+            let current_mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+            if current_mtime != Some(cached_mtime) || cached_content != content {
+                return ToolResult::error(format!(
+                    "⚠️ Файл {} изменился ПОСЛЕ твоего file_read (кто-то правил вручную или другой процесс). \
+                     Затирать чужие правки нельзя — вызови file_read заново и повтори edit с учётом свежего содержимого.",
+                    file_path
+                ));
+            }
+        }
+
         // ФАЗЗИ-МАТЧИНГ: точное совпадение -> замена; иначе поиск окна
         // строк с нормализованными пробелами (модель часто промахивается
         // на пару пробелов/переносов — раньше это был жёсткий отказ).
@@ -405,21 +537,16 @@ impl Tool for FileEditTool {
             }
         };
 
-        // Write the file
+        // Write the file — АТОМАРНО (tmp+rename): краш не оставит обрезанный файл.
         let diff_note = unified_diff(&content, &new_content, 40)
             .map(|(d, a, r)| format!("\nИзменения (+{a}/−{r}):\n{d}"))
             .unwrap_or_default();
-        let write_tool = FileWriteTool::new(self.workdir.clone());
-        let write_result = write_tool.execute(&serde_json::json!({
-            "file_path": file_path,
-            "content": new_content
-        })).await;
-
-        if !write_result.success {
-            return write_result;
+        if let Err(e) = atomic_write(&path, new_content.as_bytes()).await {
+            return ToolResult::error(format!("Error writing file: {}", e));
         }
+        // Обновляем кэш свежим содержимым (mtime возьмётся текущий).
+        self.cache.put(&path, new_content.clone());
 
-        // Убираем дублирующий дифф от write, оставляя свой компактный.
         ToolResult::success(format!("File edited: {}{}", file_path, diff_note))
     }
 
@@ -442,14 +569,17 @@ pub struct FileDeleteTool {
     /// разрешение ("один раз / всегда для file_delete / нет"). Ответ
     /// "всегда" снимает вопросы на остаток сессии.
     permissions: std::sync::Arc<crate::permissions::PermissionManager>,
+    /// Правила: deny блокирует удаление без вопросов (например секреты).
+    engine: std::sync::Arc<crate::permissions::PermissionEngine>,
 }
 
 impl FileDeleteTool {
     pub fn new(
         workdir: WorkDir,
         permissions: std::sync::Arc<crate::permissions::PermissionManager>,
+        engine: std::sync::Arc<crate::permissions::PermissionEngine>,
     ) -> Self {
-        Self { workdir, permissions }
+        Self { workdir, permissions, engine }
     }
 }
 
@@ -470,28 +600,43 @@ impl Tool for FileDeleteTool {
             return ToolResult::error(format!("Not a file: {}", file_path));
         }
 
-        // Подтверждение удаления (пропускается при "всегда разрешено",
-        // --yes или force:true).
-        let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
-        if !force && !crate::confirmation::is_auto_confirm() {
-            use crate::permissions::Outcome;
-            let outcome = self
-                .permissions
-                .request("file_delete", &format!("удалить файл {}", path.display()), "", "file_delete")
-                .await;
-            match outcome {
-                Outcome::Granted => {}
-                Outcome::Denied => {
-                    return ToolResult::error(format!(
-                        "🚫 Пользователь ОТКЛОНИЛ удаление {}. Уточни, как действовать.",
-                        path.display()
-                    ));
-                }
-                Outcome::Expired => {
-                    return ToolResult::error(format!(
-                        "⏳ Нет ответа на запрос удаления за 3 минуты — отменено ({}).",
-                        path.display()
-                    ));
+        // PERMISSIONS-AS-DATA: deny (секреты по дефолту) блокирует до
+        // вопросов; allow — пропускает; ask/None — старый интерактивный путь.
+        let pkey = permission_key(&self.workdir, &path);
+        match self.engine.evaluate("delete", &pkey) {
+            Some(crate::permissions::RuleAction::Deny) => {
+                return ToolResult::error(format!(
+                    "🚫 Удаление '{pkey}' запрещено правилом разрешений (это защищённый файл)."
+                ));
+            }
+            Some(crate::permissions::RuleAction::Allow) => {
+                // Правило доверия — удаляем без вопроса.
+            }
+            _ => {
+                // Подтверждение удаления (пропускается при "всегда разрешено",
+                // --yes или force:true).
+                let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+                if !force && !crate::confirmation::is_auto_confirm() {
+                    use crate::permissions::Outcome;
+                    let outcome = self
+                        .permissions
+                        .request("file_delete", &format!("удалить файл {}", path.display()), "", "file_delete")
+                        .await;
+                    match outcome {
+                        Outcome::Granted => {}
+                        Outcome::Denied => {
+                            return ToolResult::error(format!(
+                                "🚫 Пользователь ОТКЛОНИЛ удаление {}. Уточни, как действовать.",
+                                path.display()
+                            ));
+                        }
+                        Outcome::Expired => {
+                            return ToolResult::error(format!(
+                                "⏳ Нет ответа на запрос удаления за 3 минуты — отменено ({}).",
+                                path.display()
+                            ));
+                        }
+                    }
                 }
             }
         }

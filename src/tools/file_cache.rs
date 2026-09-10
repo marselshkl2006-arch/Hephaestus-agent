@@ -39,6 +39,15 @@ impl FileCache {
         }
     }
 
+    /// Сырой peek БЕЗ проверки свежести: (mtime на момент кэширования,
+    /// content). Нужен edit-инструменту для детекта устаревания — САМО
+    /// расхождение mtime и есть сигнал «файл изменился после file_read».
+    pub fn peek_cached(&self, path: &Path) -> Option<(SystemTime, String)> {
+        let key = path.to_string_lossy().to_string();
+        let entry = self.inner.get(&key)?;
+        Some((entry.mtime, entry.content))
+    }
+
     pub fn put(&self, path: &Path, content: String) {
         if let Ok(meta) = std::fs::metadata(path) {
             if let Ok(mtime) = meta.modified() {

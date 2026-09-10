@@ -28,13 +28,176 @@
 //! НЕ спрашиваются никогда — они заблокированы всегда.
 
 use std::collections::HashSet;
-use std::sync::Mutex as StdMutex;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use tokio::sync::oneshot;
 
 /// Сколько ждать ответа человека, прежде чем отклонить действие.
 pub const WAIT_TIMEOUT: Duration = Duration::from_secs(180);
+
+// ════════════════════════ PERMISSIONS-AS-DATA (по образцу opencode) ═════
+//
+// Декларативные правила из config.toml решают БЕЗ вопроса человеку:
+//
+//   [[permissions.rules]]
+//   tool = "bash"          # bash | edit | read | delete | * (любой)
+//   pattern = "git *"      # glob по ключу (команда/путь)
+//   action = "allow"       # allow | ask | deny
+//
+// ПОСЛЕДНЕЕ совпадение выигрывает (last-match-wins), порядок правил = порядок
+// в конфиге. Слои сверху вниз: встроенные дефолты (защита .env/ключей) →
+// правила из конфига → правила сессии («всегда разрешить» из /allow always).
+//
+// Каждая оценка пишется в audit trail: state.db (permission_log) + файловый
+// лог — видно, какое правило решило судьбу вызова.
+
+use serde::{Deserialize, Serialize};
+
+/// Действие правила.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RuleAction {
+    Allow,
+    Ask,
+    Deny,
+}
+
+impl RuleAction {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RuleAction::Allow => "allow",
+            RuleAction::Ask => "ask",
+            RuleAction::Deny => "deny",
+        }
+    }
+}
+
+/// Одно правило из конфига (serde-совместимо с [[permissions.rules]]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuleConfig {
+    pub tool: String,
+    pub pattern: String,
+    pub action: RuleAction,
+}
+
+/// Встроенные дефолты: чувствительные файлы НЕ читаются/не правятся молча.
+/// Пользовательские правила идут ПОСЛЕ и могут перекрыть (например
+/// разрешить .env.example).
+fn default_rules() -> Vec<RuleConfig> {
+    let sensitive = ["**/.env", "**/.env.*", "**/*.pem", "**/*.key", "**/id_rsa*", "**/secrets*", "**/credentials*"];
+    let mut v = Vec::new();
+    for p in sensitive {
+        v.push(RuleConfig { tool: "read".into(), pattern: p.into(), action: RuleAction::Ask });
+        v.push(RuleConfig { tool: "edit".into(), pattern: p.into(), action: RuleAction::Ask });
+        v.push(RuleConfig { tool: "delete".into(), pattern: p.into(), action: RuleAction::Deny });
+    }
+    v
+}
+
+pub struct PermissionEngine {
+    /// [дефолты..., конфиг..., правила сессии...] — last-match-wins.
+    rules: StdMutex<Vec<RuleConfig>>,
+    /// Число правил, добавленных в течение сессии (хвост вектора) —
+    /// /permissions clear удаляет только их.
+    session_rules: StdMutex<usize>,
+    /// Audit trail в БД (None — например в тестах).
+    audit: StdMutex<Option<Arc<crate::state_db::StateDb>>>,
+}
+
+impl PermissionEngine {
+    pub fn new(config_rules: Vec<RuleConfig>) -> Self {
+        let mut rules = default_rules();
+        rules.extend(config_rules);
+        Self {
+            rules: StdMutex::new(rules),
+            session_rules: StdMutex::new(0),
+            audit: StdMutex::new(None),
+        }
+    }
+
+    /// Подключить audit-трейл в state.db.
+    pub fn set_audit(&self, db: Arc<crate::state_db::StateDb>) {
+        if let Ok(mut a) = self.audit.lock() {
+            *a = Some(db);
+        }
+    }
+
+    /// Правило сессии (ответ пользователя «всегда разрешить» или /permissions add).
+    pub fn add_session_rule(&self, tool: &str, pattern: &str, action: RuleAction) {
+        if pattern.is_empty() {
+            return;
+        }
+        if let Ok(mut r) = self.rules.lock() {
+            r.push(RuleConfig { tool: tool.into(), pattern: pattern.into(), action });
+        }
+        if let Ok(mut c) = self.session_rules.lock() {
+            *c += 1;
+        }
+    }
+
+    /// Удалить правила сессии (/permissions clear) — конфиг и дефолты остаются.
+    pub fn clear_session_rules(&self) {
+        if let Ok(mut r) = self.rules.lock() {
+            let keep = r.len().saturating_sub(self.session_rules.lock().map(|c| *c).unwrap_or(0));
+            r.truncate(keep);
+        }
+        if let Ok(mut c) = self.session_rules.lock() {
+            *c = 0;
+        }
+    }
+
+    /// Оценка правила. None — ничего не совпало (решает вызывающая логика:
+    /// для bash — анализ риска, для read/edit — разрешить).
+    pub fn evaluate(&self, tool: &str, key: &str) -> Option<RuleAction> {
+        let rules = self.rules.lock().ok()?;
+        let mut matched: Option<(RuleAction, String)> = None;
+        for r in rules.iter() {
+            if r.tool != "*" && r.tool != tool {
+                continue;
+            }
+            if let Ok(pat) = glob::Pattern::new(&r.pattern) {
+                if pat.matches(key) {
+                    matched = Some((r.action, r.pattern.clone()));
+                }
+            }
+        }
+        if let Some((action, pattern)) = &matched {
+            self.audit_log(tool, key, action.as_str(), &format!("rule:{pattern}"));
+        }
+        matched.map(|(a, _)| a)
+    }
+
+    /// Все правила для /permissions: (tool, pattern, action, is_session).
+    pub fn list_rules(&self) -> Vec<(String, String, String, bool)> {
+        let rules = self.rules.lock().map(|r| r.clone()).unwrap_or_default();
+        let session = self.session_rules.lock().map(|c| *c).unwrap_or(0);
+        let total = rules.len();
+        rules
+            .into_iter()
+            .enumerate()
+            .map(|(i, r)| (r.tool, r.pattern, r.action.as_str().to_string(), i >= total - session))
+            .collect()
+    }
+
+    fn audit_log(&self, tool: &str, key: &str, action: &str, source: &str) {
+        crate::logging_system::info(&format!(
+            "[permission] tool={tool} action={action} key={key:?} source={source}"
+        ));
+        if let Ok(a) = self.audit.lock() {
+            if let Some(db) = a.as_ref() {
+                db.log_permission(tool, key, action, source);
+            }
+        }
+    }
+
+    /// Audit-запись решения БЕЗ правила (человек/дефолт).
+    pub fn audit_decision(&self, tool: &str, key: &str, action: &str, source: &str) {
+        self.audit_log(tool, key, action, source);
+    }
+}
+
+// ════════════════════════ интерактивная очередь разрешений ══════════════
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionMode {
@@ -85,6 +248,9 @@ pub struct PermissionManager {
     inner: StdMutex<Inner>,
     /// Ключи, на которые ответили "всегда разрешать" (в течение сессии).
     always_allowed: StdMutex<HashSet<String>>,
+    /// Движок правил: ответ «всегда» регистрируется и как session-rule,
+    /// чтобы движок (а не только хеш-набор) пропускал последующие вызовы.
+    engine: StdMutex<Option<Arc<PermissionEngine>>>,
 }
 
 impl PermissionManager {
@@ -96,6 +262,14 @@ impl PermissionManager {
                 queue: std::collections::VecDeque::new(),
             }),
             always_allowed: StdMutex::new(HashSet::new()),
+            engine: StdMutex::new(None),
+        }
+    }
+
+    /// Подключить движок правил (вызывается один раз при старте).
+    pub fn set_engine(&self, engine: Arc<PermissionEngine>) {
+        if let Ok(mut e) = self.engine.lock() {
+            *e = Some(engine);
         }
     }
 
@@ -197,6 +371,17 @@ impl PermissionManager {
         }
         if let Ok(mut s) = self.always_allowed.lock() {
             s.insert(key.to_string());
+        }
+        // ДУБЛИРОВАНИЕ В ДВИЖОК: «всегда» должно пропускать не только те
+        // вызовы, что пойдут через request() с этим ключом, но и оценки
+        // движка (engine.evaluate) — например bash-команды, начинающиеся
+        // с этого ключа. Регистрируем правило сессии.
+        if let Ok(e) = self.engine.lock() {
+            if let Some(engine) = e.as_ref() {
+                // Точный ключ И префиксная форма для bash-команд.
+                engine.add_session_rule("*", key, RuleAction::Allow);
+                engine.add_session_rule("*", &format!("{key} *"), RuleAction::Allow);
+            }
         }
     }
 

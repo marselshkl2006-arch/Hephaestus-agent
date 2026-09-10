@@ -94,6 +94,16 @@ CREATE TABLE IF NOT EXISTS messages_archive (
     created_at   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_messages_archive_session ON messages_archive(session_id, seq);
+
+CREATE TABLE IF NOT EXISTS permission_log (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts      TEXT NOT NULL,
+    tool    TEXT NOT NULL,
+    key     TEXT NOT NULL,
+    action  TEXT NOT NULL,
+    source  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_permission_log_ts ON permission_log(ts);
 "#;
 
 /// Строка tool-call для просмотра после рестарта.
@@ -491,6 +501,36 @@ impl StateDb {
                     duration_ms: r.get(3)?,
                     error: r.get(4)?,
                 })
+            })?;
+            let mut out = Vec::new();
+            for row in it {
+                out.push(row.map_err(rusqlite::Error::from)?);
+            }
+            Ok(out)
+        })
+        .unwrap_or_default()
+    }
+
+    // ── permission_log (audit trail) ────────────────────────────────────
+
+    /// Запись решения по разрешению: кто, что, почему (правило/человек).
+    /// source: "rule:<pattern>" | "interactive" | "session" | "default".
+    pub fn log_permission(&self, tool: &str, key: &str, action: &str, source: &str) {
+        let _ = self.with_conn(|c| {
+            c.execute(
+                "INSERT INTO permission_log(ts, tool, key, action, source) VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![now_str(), tool, key, action, source],
+            )
+        });
+    }
+
+    pub fn list_permission_log(&self, limit: usize) -> Vec<(String, String, String, String, String)> {
+        self.with_conn(|c| {
+            let mut stmt = c.prepare(
+                "SELECT ts, tool, key, action, source FROM permission_log ORDER BY id DESC LIMIT ?1",
+            )?;
+            let it = stmt.query_map(rusqlite::params![limit as i64], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
             })?;
             let mut out = Vec::new();
             for row in it {

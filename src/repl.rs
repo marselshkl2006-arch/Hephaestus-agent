@@ -1321,16 +1321,73 @@ async fn handle_command(
     if cmd == "permissions" || cmd.starts_with("permissions ") {
         if cmd.trim_end() == "permissions clear" {
             permissions.clear_always();
-            history.push(HistoryEntry::new(Role::System, "Все 'всегда разрешено' забыты."));
+            // Сессийные правила движка («всегда») тоже забываем; правила
+            // из config.toml и встроенные дефолты остаются.
+            if let Ok(a) = agent.try_lock() {
+                a.engine.clear_session_rules();
+            }
+            history.push(HistoryEntry::new(Role::System, "Все 'всегда разрешено' забыты (правила config.toml остались)."));
             return false;
         }
-        let keys = permissions.list_always();
-        let text = if keys.is_empty() {
-            "Постоянных разрешений нет. Они появляются после '/allow always'.".to_string()
+        if let Some(add_args) = cmd.strip_prefix("permissions add ") {
+            // /permissions add <tool> <pattern> <allow|ask|deny>
+            let parts: Vec<&str> = add_args.split_whitespace().collect();
+            let [tool, pattern, action] = parts.as_slice() else {
+                history.push(HistoryEntry::new(Role::Error, "Формат: /permissions add <tool> <pattern> <allow|ask|deny>\nПример: /permissions add bash \"cargo *\" allow"));
+                return false;
+            };
+            let action = match *action {
+                "allow" => crate::permissions::RuleAction::Allow,
+                "ask" => crate::permissions::RuleAction::Ask,
+                "deny" => crate::permissions::RuleAction::Deny,
+                other => {
+                    history.push(HistoryEntry::new(Role::Error, format!("Неизвестное действие '{other}' (allow|ask|deny)")));
+                    return false;
+                }
+            };
+            if let Ok(a) = agent.try_lock() {
+                a.engine.add_session_rule(tool, pattern, action);
+                history.push(HistoryEntry::new(Role::System, format!("✅ Правило добавлено: {tool} '{pattern}' → {} (действует до конца сессии; для постоянного — [[permissions.rules]] в config.toml)", action.as_str())));
+            } else {
+                history.push(HistoryEntry::new(Role::System, "Агент занят — попробуйте ещё раз чуть позже."));
+            }
+            return false;
+        }
+        let mut lines = String::new();
+        // 1) Правила движка: дефолты + конфиг + сессия.
+        if let Ok(a) = agent.try_lock() {
+            let rules = a.engine.list_rules();
+            lines.push_str(&format!("Правила разрешений ({}) — последнее совпадение выигрывает:\n", rules.len()));
+            for (tool, pattern, action, is_session) in &rules {
+                let mark = if *is_session { " [сессия]" } else { "" };
+                let icon = match action.as_str() {
+                    "allow" => "✅",
+                    "ask" => "❓",
+                    _ => "🚫",
+                };
+                lines.push_str(&format!("  {icon} {tool}: '{pattern}' → {action}{mark}\n"));
+            }
+            lines.push_str("\nДобавить на сессию: /permissions add <tool> <\"паттерн\"> <allow|ask|deny>\nПостоянно: [[permissions.rules]] в ~/.hephaestus/config.toml\nСбросить сессийные: /permissions clear\n");
+            // 2) Классические always-ключи (кеш ответов «всегда»).
+            let keys = permissions.list_always();
+            if !keys.is_empty() {
+                lines.push_str(&format!("\nРазрешено всегда (сессия):\n  • {}\n", keys.join("\n  • ")));
+            }
+            // 3) Audit trail — последние решения.
+            let log = a.state.list_permission_log(15);
+            if !log.is_empty() {
+                lines.push_str("\nПоследние решения (audit trail, state.db):\n");
+                for (ts, tool, key, action, source) in log.iter().rev() {
+                    let short_ts = ts.get(11..19).unwrap_or(ts);
+                    let short_key = crate::truncate_chars(key, 60);
+                    let src = crate::truncate_chars(source, 40);
+                    lines.push_str(&format!("  {short_ts} [{action}] {tool}: {short_key} ({src})\n"));
+                }
+            }
         } else {
-            format!("Разрешено всегда (сессия):\n  • {}\nСбросить: /permissions clear", keys.join("\n  • "))
-        };
-        history.push(HistoryEntry::new(Role::System, text));
+            lines.push_str("Агент занят — попробуйте ещё раз чуть позже.");
+        }
+        history.push(HistoryEntry::new(Role::System, lines));
         return false;
     }
 

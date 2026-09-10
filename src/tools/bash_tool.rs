@@ -5,7 +5,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use tokio::process::Command;
 use crate::workdir::WorkDir;
-use crate::permissions::{PermissionManager, Outcome};
+use crate::permissions::{PermissionManager, Outcome, PermissionEngine, RuleAction};
 
 pub struct BashTool {
     /// ИСПРАВЛЕНО (Telegram-бот не мог работать с файлами): было
@@ -19,11 +19,14 @@ pub struct BashTool {
     /// ("разрешить один раз / всегда / нет") — через TUI или Telegram,
     /// в зависимости от того, откуда работает агент.
     permissions: Arc<PermissionManager>,
+    /// Декларативные правила (config.toml [[permissions.rules]] + сессия):
+    /// allow пропускает без вопроса, deny блокирует, ask спрашивает.
+    engine: Arc<PermissionEngine>,
 }
 
 impl BashTool {
-    pub fn new(working_dir: WorkDir, permissions: Arc<PermissionManager>) -> Self {
-        Self { working_dir, validator: SecurityValidator::new(), permissions }
+    pub fn new(working_dir: WorkDir, permissions: Arc<PermissionManager>, engine: Arc<PermissionEngine>) -> Self {
+        Self { working_dir, validator: SecurityValidator::new(), permissions, engine }
     }
 }
 
@@ -52,7 +55,6 @@ impl Tool for BashTool {
             .get("command")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
 
         if command.is_empty() {
             return ToolResult::error("No command provided");
@@ -69,37 +71,88 @@ impl Tool for BashTool {
                 check.reason.unwrap_or_else(|| "правило безопасности".to_string())
             ));
         }
-        if check.risk == ActionRisk::Critical || check.risk == ActionRisk::High {
-            // Явный `force: true` от модели ИЛИ глобальный `--yes`/`-y`
-            // пропускают вопрос; иначе — запрос разрешения человеку.
-            if !force && !crate::confirmation::is_auto_confirm() {
-                let always_key = command
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("")
-                    .trim_start_matches("./")
-                    .to_lowercase();
-                let summary = format!("$ {}", command);
-                let reason = format!(
-                    "{} {}",
-                    check.warning.clone().unwrap_or_default(),
-                    check.reason.clone().unwrap_or_default()
-                )
-                .trim()
-                .to_string();
-                match self.permissions.request("bash", &summary, &reason, &always_key).await {
-                    Outcome::Granted => {}
-                    Outcome::Denied => {
-                        return ToolResult::error(format!(
-                            "🚫 Пользователь ОТКЛОНИЛ команду. Не повторяй её без обсуждения — спроси, как действовать иначе.\nКоманда: {}",
-                            command
-                        ));
+
+        // PERMISSIONS-AS-DATA: декларативное правило из config.toml/сессии
+        // решает ДО анализа риска. allow — выполнить даже High/Critical
+        // (пользователь явно доверяет, например "git *" → allow);
+        // deny — блокировать без вопросов; ask — спросить независимо от
+        // риска; None (нет правила) — старая логика по риску ниже.
+        let rule = self.engine.evaluate("bash", command);
+        match rule {
+            Some(RuleAction::Deny) => {
+                self.engine.audit_decision("bash", command, "denied", "interactive");
+                return ToolResult::error(format!(
+                    "🚫 Команда запрещена правилом разрешений (config.toml [[permissions.rules]]):\n{}",
+                    command
+                ));
+            }
+            Some(RuleAction::Allow) => {
+                // Правило доверия — идём выполнять, force не нужен.
+            }
+            _ => {
+                if rule == Some(RuleAction::Ask) {
+                    // Явное ask-правило: спрашиваем даже Low-риск.
+                    let always_key = command
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("")
+                        .trim_start_matches("./")
+                        .to_lowercase();
+                    match self.permissions.request(
+                        "bash",
+                        &format!("$ {command}"),
+                        "запрошено правилом permissions (ask)",
+                        &always_key,
+                    ).await {
+                        Outcome::Granted => {}
+                        Outcome::Denied => {
+                            return ToolResult::error(format!(
+                                "🚫 Пользователь ОТКЛОНИЛ команду. Не повторяй её без обсуждения — спроси, как действовать иначе.\nКоманда: {}",
+                                command
+                            ));
+                        }
+                        Outcome::Expired => {
+                            return ToolResult::error(format!(
+                                "⏳ Никто не ответил на запрос разрешения за 3 минуты — команда отменена.\nКоманда: {}\nПовтори вызов, когда пользователь будет рядом.",
+                                command
+                            ));
+                        }
                     }
-                    Outcome::Expired => {
-                        return ToolResult::error(format!(
-                            "⏳ Никто не ответил на запрос разрешения за 3 минуты — команда отменена.\nКоманда: {}\nПовтори вызов, когда пользователь будет рядом.",
-                            command
-                        ));
+                } else if check.risk == ActionRisk::Critical || check.risk == ActionRisk::High {
+                    // Старый путь: риск без правила.
+                    // Явный `force: true` от модели ИЛИ глобальный `--yes`/`-y`
+                    // пропускают вопрос; иначе — запрос разрешения человеку.
+                    let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+                    if !force && !crate::confirmation::is_auto_confirm() {
+                        let always_key = command
+                            .split_whitespace()
+                            .next()
+                            .unwrap_or("")
+                            .trim_start_matches("./")
+                            .to_lowercase();
+                        let summary = format!("$ {}", command);
+                        let reason = format!(
+                            "{} {}",
+                            check.warning.clone().unwrap_or_default(),
+                            check.reason.clone().unwrap_or_default()
+                        )
+                        .trim()
+                        .to_string();
+                        match self.permissions.request("bash", &summary, &reason, &always_key).await {
+                            Outcome::Granted => {}
+                            Outcome::Denied => {
+                                return ToolResult::error(format!(
+                                    "🚫 Пользователь ОТКЛОНИЛ команду. Не повторяй её без обсуждения — спроси, как действовать иначе.\nКоманда: {}",
+                                    command
+                                ));
+                            }
+                            Outcome::Expired => {
+                                return ToolResult::error(format!(
+                                    "⏳ Никто не ответил на запрос разрешения за 3 минуты — команда отменена.\nКоманда: {}\nПовтори вызов, когда пользователь будет рядом.",
+                                    command
+                                ));
+                            }
+                        }
                     }
                 }
             }

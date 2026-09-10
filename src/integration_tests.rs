@@ -205,6 +205,202 @@ mod state_db_turn_integration {
 }
 
 #[cfg(test)]
+mod permissions_engine_integration {
+    use crate::permissions::{PermissionEngine, RuleAction, RuleConfig};
+
+    #[test]
+    fn last_match_wins() {
+        let engine = PermissionEngine::new(vec![
+            RuleConfig { tool: "bash".into(), pattern: "git *".into(), action: RuleAction::Allow },
+            RuleConfig { tool: "bash".into(), pattern: "git push*".into(), action: RuleAction::Deny },
+        ]);
+        // "git push" совпадает с ОБОИМИ правилами — последнее (deny) выигрывает.
+        assert_eq!(engine.evaluate("bash", "git push origin main"), Some(RuleAction::Deny));
+        // "git status" — только первое.
+        assert_eq!(engine.evaluate("bash", "git status"), Some(RuleAction::Allow));
+        // Несовпадение — None (решает стандартная логика риска).
+        assert_eq!(engine.evaluate("bash", "cargo build"), None);
+    }
+
+    #[test]
+    fn session_rules_override_config() {
+        let engine = PermissionEngine::new(vec![
+            RuleConfig { tool: "bash".into(), pattern: "rm *".into(), action: RuleAction::Deny },
+        ]);
+        assert_eq!(engine.evaluate("bash", "rm x.txt"), Some(RuleAction::Deny));
+        // Пользователь разрешил на сессию — сессийное правило позже и выигрывает.
+        engine.add_session_rule("bash", "rm *", RuleAction::Allow);
+        assert_eq!(engine.evaluate("bash", "rm x.txt"), Some(RuleAction::Allow));
+        // clear удаляет только сессийные.
+        engine.clear_session_rules();
+        assert_eq!(engine.evaluate("bash", "rm x.txt"), Some(RuleAction::Deny));
+    }
+
+    #[test]
+    fn builtin_defaults_protect_secrets() {
+        let engine = PermissionEngine::new(vec![]);
+        // .env — ask по умолчанию (не молча читается, не блокируется навсегда).
+        assert_eq!(engine.evaluate("read", "project/.env"), Some(RuleAction::Ask));
+        assert_eq!(engine.evaluate("read", ".env.local"), Some(RuleAction::Ask));
+        assert_eq!(engine.evaluate("edit", "app/.env"), Some(RuleAction::Ask));
+        // Ключи/сертификаты тоже.
+        assert_eq!(engine.evaluate("read", "server.pem"), Some(RuleAction::Ask));
+        assert_eq!(engine.evaluate("delete", "id_rsa"), Some(RuleAction::Deny));
+        // Обычный файл — без правила.
+        assert_eq!(engine.evaluate("read", "src/main.rs"), None);
+        // Пользователь может перекрыть дефолт (например .env.example разрешён).
+        let engine2 = PermissionEngine::new(vec![
+            RuleConfig { tool: "read".into(), pattern: "**/.env.example".into(), action: RuleAction::Allow },
+        ]);
+        assert_eq!(engine2.evaluate("read", ".env.example"), Some(RuleAction::Allow));
+    }
+
+    #[test]
+    fn wildcard_tool_matches_everything() {
+        let engine = PermissionEngine::new(vec![
+            RuleConfig { tool: "*".into(), pattern: "certain/*".into(), action: RuleAction::Deny },
+        ]);
+        assert_eq!(engine.evaluate("read", "certain/file"), Some(RuleAction::Deny));
+        assert_eq!(engine.evaluate("edit", "certain/file"), Some(RuleAction::Deny));
+    }
+
+    #[test]
+    fn audit_trail_written() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let db = std::sync::Arc::new(crate::state_db::StateDb::build_pub(
+            conn,
+            std::path::PathBuf::from(":memory:"),
+        ).unwrap());
+        let engine = PermissionEngine::new(vec![
+            RuleConfig { tool: "bash".into(), pattern: "git status".into(), action: RuleAction::Allow },
+        ]);
+        engine.set_audit(db.clone());
+        let _ = engine.evaluate("bash", "git status");
+        engine.audit_decision("bash", "cargo test", "asked", "interactive");
+
+        let log = db.list_permission_log(10);
+        assert_eq!(log.len(), 2);
+        // Свежие сверху.
+        assert_eq!(log[0].2, "cargo test");
+        assert_eq!(log[0].3, "asked");
+        // У решения по правилу источник указывает на совпавший паттерн.
+        assert_eq!(log[1].3, "allow");
+        assert!(log[1].4.contains("rule:git status"), "источник должен ссылаться на правило: {:?}", log[1].4);
+    }
+}
+
+#[cfg(test)]
+mod atomic_files_integration {
+    use crate::tools::file_tools::{FileWriteTool, FileEditTool};
+    use crate::tools::{Tool, file_cache::FileCache};
+    use crate::workdir::WorkDir;
+    use crate::permissions::PermissionEngine;
+
+    fn setup() -> (tempfile::TempDir, WorkDir) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let wd = WorkDir::new(tmp.path().to_path_buf());
+        (tmp, wd)
+    }
+
+    /// Атомарная запись: содержимое на месте, временных файлов не остаётся.
+    #[tokio::test]
+    async fn write_is_atomic_and_cleans_up() {
+        let (_t, wd) = setup();
+        let engine = std::sync::Arc::new(PermissionEngine::new(vec![]));
+        let tool = FileWriteTool::new(wd.clone(), engine);
+
+        // Перезапись существующего.
+        std::fs::write(wd.get().join("f.txt"), "old\n").unwrap();
+        let res = tool.execute(&serde_json::json!({
+            "file_path": "f.txt",
+            "content": "новое содержимое\n"
+        })).await;
+        assert!(res.success, "{}", res.error.unwrap_or_default());
+        assert_eq!(std::fs::read_to_string(wd.get().join("f.txt")).unwrap(), "новое содержимое\n");
+        let leftovers: Vec<_> = std::fs::read_dir(wd.get())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains("hef-tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "tmp-файлы не убраны: {leftovers:?}");
+    }
+
+    /// FRESHNESS: файл прочитан file_read-ом → пользователь изменил его
+    /// на диске → edit ОБЯЗАН отказаться, а не затереть чужие правки.
+    #[tokio::test]
+    async fn edit_rejects_stale_read() {
+        let (_t, wd) = setup();
+        let engine = std::sync::Arc::new(PermissionEngine::new(vec![]));
+        let cache = FileCache::default();
+        let read = crate::tools::file_tools::FileReadTool::with_cache(
+            cache.clone(), wd.clone(), engine.clone(),
+            std::sync::Arc::new(crate::permissions::PermissionManager::new()),
+        );
+        let edit = FileEditTool::with_cache(cache, wd.clone(), engine);
+
+        std::fs::write(wd.get().join("f.rs"), "fn a() {}\nfn b() {}\n").unwrap();
+        // Модель читает файл (кэш запоминает mtime+content).
+        let r = read.execute(&serde_json::json!({"file_path": "f.rs"})).await;
+        assert!(r.success);
+
+        // Пользователь правит файл вручную.
+        std::fs::write(wd.get().join("f.rs"), "fn a() {}\nfn b() {}\nfn USER_EDIT() {}\n").unwrap();
+
+        // Edit по устаревшему снимку — ОТКАЗ.
+        let res = edit.execute(&serde_json::json!({
+            "file_path": "f.rs",
+            "old_text": "fn b() {}",
+            "new_text": "fn c() {}"
+        })).await;
+        assert!(!res.success, "edit по устаревшему снимку должен отказаться");
+        assert!(res.error.unwrap_or_default().contains("изменился"), "{}", res.output);
+        // Пользовательская правка ЦЕЛА.
+        let disk = std::fs::read_to_string(wd.get().join("f.rs")).unwrap();
+        assert!(disk.contains("USER_EDIT"));
+    }
+
+    /// Нормальный путь: read → edit без чужих правок — работает.
+    #[tokio::test]
+    async fn edit_works_when_fresh() {
+        let (_t, wd) = setup();
+        let engine = std::sync::Arc::new(PermissionEngine::new(vec![]));
+        let cache = FileCache::default();
+        let read = crate::tools::file_tools::FileReadTool::with_cache(
+            cache.clone(), wd.clone(), engine.clone(),
+            std::sync::Arc::new(crate::permissions::PermissionManager::new()),
+        );
+        let edit = FileEditTool::with_cache(cache, wd.clone(), engine);
+
+        std::fs::write(wd.get().join("f.rs"), "fn a() {}\n").unwrap();
+        let _ = read.execute(&serde_json::json!({"file_path": "f.rs"})).await;
+        let res = edit.execute(&serde_json::json!({
+            "file_path": "f.rs",
+            "old_text": "fn a() {}",
+            "new_text": "fn b() {}"
+        })).await;
+        assert!(res.success, "{}", res.error.unwrap_or_default());
+        assert_eq!(std::fs::read_to_string(wd.get().join("f.rs")).unwrap(), "fn b() {}\n");
+    }
+
+    /// Edit без предварительного file_read тоже работает (кэша нет —
+    /// проверка не мешает), это легаси-совместимость.
+    #[tokio::test]
+    async fn edit_without_prior_read_still_works() {
+        let (_t, wd) = setup();
+        let engine = std::sync::Arc::new(PermissionEngine::new(vec![]));
+        let edit = FileEditTool::with_cache(FileCache::default(), wd.clone(), engine);
+        std::fs::write(wd.get().join("g.txt"), "hello world\n").unwrap();
+        let res = edit.execute(&serde_json::json!({
+            "file_path": "g.txt",
+            "old_text": "hello",
+            "new_text": "привет"
+        })).await;
+        assert!(res.success, "{}", res.error.unwrap_or_default());
+        assert_eq!(std::fs::read_to_string(wd.get().join("g.txt")).unwrap(), "привет world\n");
+    }
+}
+
+#[cfg(test)]
 mod memory_staging_integration {
     use crate::memory_tools;
     use crate::tools::Tool;

@@ -253,6 +253,10 @@ pub struct Agent {
     /// нет"). Публичное поле: TUI и Telegram-бот читают очередь запросов
     /// и доставляют ответ человека.
     pub permissions: Arc<permissions::PermissionManager>,
+    /// Движок декларативных правил (permissions-as-data): config.toml
+    /// [[permissions.rules]] + правила сессии. Публичный: /permissions
+    /// в REPL показывает правила и audit trail.
+    pub engine: Arc<permissions::PermissionEngine>,
     /// Рабочий план задачи агента (todo_write/todo_read) — подсказка
     /// подмешивается в system prompt каждый ход, чтобы модель шла по плану.
     pub todos: Arc<todo_tools::TodoBoard>,
@@ -296,8 +300,25 @@ pub struct Agent {
 
 impl Agent {
     pub fn new(config: LLMConfig, auto_approve: bool, workdir: workdir::WorkDir) -> Self {
+        Self::new_with_rules(config, auto_approve, workdir, Vec::new())
+    }
+
+    /// Полная фабрика: правила разрешений из config.toml
+    /// ([[permissions.rules]]) приходят отдельным параметром — Agent::new
+    /// сохраняет старую сигнатуру для тестов/суб-агентов.
+    pub fn new_with_rules(
+        config: LLMConfig,
+        auto_approve: bool,
+        workdir: workdir::WorkDir,
+        permission_rules: Vec<permissions::RuleConfig>,
+    ) -> Self {
         let monitoring = Arc::new(monitoring::MonitoringSystem::new());
         let permissions = Arc::new(permissions::PermissionManager::new());
+        // ДВИЖОК ПРАВИЛ (permissions-as-data): дефолты (.env/ключи → ask)
+        // + правила пользователя из config.toml. Audit trail подключается
+        // ниже, когда открыта state.db.
+        let engine = Arc::new(permissions::PermissionEngine::new(permission_rules));
+        permissions.set_engine(engine.clone());
         let todos = Arc::new(todo_tools::TodoBoard::new());
         let llm_config = config.clone();
         // Суб-агенты: фабрика создаётся здесь, чтобы ToolsEnv мог
@@ -311,6 +332,7 @@ impl Agent {
             workdir: workdir.clone(),
             monitoring: monitoring.clone(),
             permissions: permissions.clone(),
+            engine: engine.clone(),
             todos: todos.clone(),
             llm_config: llm_config.clone(),
             subagents: subagents.clone(),
@@ -333,6 +355,8 @@ impl Agent {
         let state = state_db::StateDb::open_default();
         let (session, recovery_notice) = recover_session(&state, config.provider.as_str(), &config.model);
         let snapshots = std::sync::Arc::new(snapshots::SnapshotManager::new(workdir.get()));
+        // AUDIT TRAIL разрешений в state.db (таблица permission_log).
+        engine.set_audit(state.clone());
 
         Self {
             llm,
@@ -350,6 +374,7 @@ impl Agent {
             learning: learning::ContextLearning::new(),
             workdir,
             permissions,
+            engine,
             todos,
             mcp: Arc::new(mcp::McpManager::new()),
             queue: Arc::new(request_queue::RequestQueue::new()),
@@ -387,6 +412,10 @@ impl Agent {
             learning: learning::ContextLearning::new(),
             workdir: runner.workdir.clone(),
             permissions: runner.permissions.clone(),
+            // Реестр инструментов суб-агента общий с родителем — там уже
+            // настоящий движок с правилами. Полю же нужен просто валидный
+            // Arc: /permissions у суб-агента не вызывается.
+            engine: Arc::new(permissions::PermissionEngine::new(vec![])),
             todos: Arc::new(todo_tools::TodoBoard::new()),
             mcp: Arc::new(mcp::McpManager::new()),
             queue: Arc::new(request_queue::RequestQueue::new()),
@@ -1346,7 +1375,7 @@ async fn main() {
         None => workdir::WorkDir::from_cwd(),
     };
 
-    let mut agent = Agent::new(config, true, workdir);
+    let mut agent = Agent::new_with_rules(config, true, workdir, agent_config.permissions.clone());
     // SMALL MODEL (config.toml: small_model = "...") — служебные вызовы
     // (сводка контекста, подсказки) идут через дешёвую модель, основная
     // экономит контекст.
