@@ -22,6 +22,7 @@ pub mod worktree_tools;
 pub mod doc_generator;
 pub mod subagent;
 pub mod md_skills;
+pub mod search_tools;
 
 use file_tools::*;
 use bash_tool::BashTool;
@@ -318,7 +319,12 @@ pub fn create_tools(env: ToolsEnv) -> SharedToolRegistry {
     registry.register("file_move", Arc::new(FileMoveTool::new(workdir.clone())));
     registry.register("file_copy", Arc::new(FileCopyTool::new(workdir.clone())));
     registry.register("file_exists", Arc::new(FileExistsTool::new(workdir.clone())));
-    registry.register("glob", Arc::new(GlobTool::new(workdir.clone())));
+    // glob — улучшенная версия из search_tools (лимиты, время изменения,
+    // сортировка по свежести; поведение старого покрывается).
+    registry.register("glob", Arc::new(search_tools::GlobTool::new(workdir.clone())));
+    // grep — поиск по содержимому как инструмент первого класса
+    // (раньше модель была вынуждена гонять bash-grep).
+    registry.register("grep", Arc::new(search_tools::GrepTool::new(workdir.clone())));
     registry.register("bash", Arc::new(BashTool::new(workdir.clone(), permissions.clone())));
     registry.register("git", Arc::new(GitTool::new(workdir.clone())));
 

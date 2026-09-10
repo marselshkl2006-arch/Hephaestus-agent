@@ -7,6 +7,12 @@ use super::{ToolResult, Tool};
 use super::file_cache::FileCache;
 use crate::workdir::WorkDir;
 
+/// Дефолтный лимит строк file_read (по образцу opencode): большой файл не
+/// тащится в контекст целиком.
+pub const DEFAULT_READ_LIMIT: usize = 2000;
+/// Жёсткий максимум limit — модель не может запросить «весь файл на 100k строк».
+pub const MAX_READ_LIMIT: usize = 10_000;
+
 // ─────────────────────────────────────────────────────────── дифф ──
 
 /// Компактный unified-подобный дифф двух текстов построчным LCS.
@@ -176,6 +182,18 @@ impl Tool for FileReadTool {
         // (меняется /work_dir в REPL и /workdir <путь> в Telegram).
         let path = self.workdir.resolve(file_path);
 
+        // offset/limit (по образцу opencode): большой файл НЕ тащится в
+        // контекст целиком — по умолчанию первые 2000 строк. Модель
+        // дочитывает дозапросами с offset; в конце всегда честный маркер
+        // "обрезано", чтобы она знала, что ниже ещё есть.
+        let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize)
+            .unwrap_or(DEFAULT_READ_LIMIT);
+        let limit = limit.min(MAX_READ_LIMIT);
+
         if !path.exists() {
             // Подсказка с резолвнутым путём и рабочей директорией:
             // модель часто зовёт относительным путём не из той папки —
@@ -190,10 +208,6 @@ impl Tool for FileReadTool {
 
         if !path.is_file() {
             return ToolResult::error(format!("Not a file: {}", file_path));
-        }
-
-        if let Some(cached) = self.cache.get_if_fresh(&path) {
-            return ToolResult::success(cached);
         }
 
         let metadata = match fs::metadata(&path) {
@@ -217,18 +231,39 @@ impl Tool for FileReadTool {
         match String::from_utf8(content) {
             Ok(text) => {
                 self.cache.put(&path, text.clone());
-                ToolResult::success(text)
+                // Пагинация строк (кэш хранит весь файл — срез дешёвый).
+                let total = text.lines().count();
+                if offset == 0 && total <= limit {
+                    return ToolResult::success(text);
+                }
+                let start = offset.min(total);
+                let end = (offset.saturating_add(limit)).min(total);
+                let selected: String = text.lines().skip(start).take(end - start).collect::<Vec<_>>().join("\n");
+                let note = if end < total {
+                    format!(
+                        "\n\n…[показаны строки {}–{} из {} — файл ОБРЕЗАН; продолжайте offset={}]",
+                        start + 1,
+                        end,
+                        total,
+                        end
+                    )
+                } else if start > 0 {
+                    format!("\n\n…[показаны строки {}–{} из {} — конец файла]", start + 1, end, total)
+                } else {
+                    String::new()
+                };
+                ToolResult::success(format!("{selected}{note}"))
             }
             Err(_) => ToolResult::error("Unable to decode file with UTF-8"),
         }
     }
 
     fn description(&self) -> &'static str {
-        "Прочитать содержимое файла"
+        "Прочитать содержимое файла. Большие файлы по умолчанию обрезаются до первых 2000 строк — дочитывайте offset-ом"
     }
 
     fn parameters_schema(&self) -> Value {
-        serde_json::from_str(r#"{"type":"object","properties":{"file_path":{"type":"string","description":"Путь к файлу"}},"required":["file_path"]}"#).unwrap()
+        serde_json::from_str(r#"{"type":"object","properties":{"file_path":{"type":"string","description":"Путь к файлу"},"offset":{"type":"integer","description":"Начальная строка (0-индексация), по умолчанию 0"},"limit":{"type":"integer","description":"Сколько строк прочитать (по умолчанию 2000, максимум 10000)"}},"required":["file_path"]}"#).unwrap()
     }
 
     fn name(&self) -> &'static str {
@@ -619,67 +654,6 @@ impl Tool for FileExistsTool {
 
     fn name(&self) -> &'static str {
         "file_exists"
-    }
-}
-
-pub struct GlobTool {
-    workdir: WorkDir,
-}
-
-impl GlobTool {
-    pub fn new(workdir: WorkDir) -> Self {
-        Self { workdir }
-    }
-}
-
-#[async_trait]
-impl Tool for GlobTool {
-    async fn execute(&self, args: &Value) -> ToolResult {
-        let pattern = args.get("pattern")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-
-        let pattern = if !pattern.contains('/') && !pattern.contains('*') && !pattern.contains('?') {
-            format!("**/{}", pattern)
-        } else {
-            pattern.to_string()
-        };
-
-        let workspace_root = self.workdir.get();
-        let full_pattern = workspace_root.join(&pattern);
-        let pattern_str = full_pattern.to_str().unwrap_or("");
-
-        let mut matches = Vec::new();
-        for entry in glob::glob(pattern_str).unwrap_or_else(|_| glob::glob("").unwrap()) {
-            if let Ok(path) = entry {
-                if let Ok(rel) = path.strip_prefix(&workspace_root) {
-                    if let Some(rel_str) = rel.to_str() {
-                        matches.push(rel_str.to_string());
-                    }
-                }
-            }
-        }
-        matches.sort();
-
-        let output = if matches.is_empty() {
-            "No matches found".to_string()
-        } else {
-            matches.join("\n")
-        };
-
-        ToolResult::success(output)
-    }
-
-    fn description(&self) -> &'static str {
-        "Найти файлы по glob-шаблону (например **/*.rs)"
-    }
-
-    fn parameters_schema(&self) -> Value {
-        serde_json::from_str(r#"{"type":"object","properties":{"pattern":{"type":"string","description":"Glob-шаблон поиска"}},"required":["pattern"]}"#).unwrap()
-    }
-
-    fn name(&self) -> &'static str {
-        "glob"
     }
 }
 
