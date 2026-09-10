@@ -435,6 +435,91 @@ pub fn memory_index_lines() -> String {
     }
 }
 
+// ── СТЕЙДЖИНГ ФОНОВЫХ ЗАПИСЕЙ (по образцу tools/write_approval.py Hermes) ──
+//
+// Фоновый агент (суб-агент, задача из очереди) НЕ должен молча писать в
+// долговременную память: он может «запомнить» неверные допущения, и они
+// останутся в контексте всех будущих сессий. Такие записи СТЕЙДЖАТСЯ в
+// `~/.hephaestus/pending/memory/*.md` и переживают рестарт; пользователь
+// утверждает их командой /memory review (перенос в основную память или
+// отказ). Прямой вызов из интерактивного хода пишет как раньше.
+
+thread_local! {
+    /// true в тасках, которые считаются ФОНОВЫМИ (суб-агенты, очередь).
+    /// Ставится goal_mode/subagent при старте фонового выполнения.
+    static BACKGROUND_CONTEXT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Пометить ТЕКУЩУЮ задачу как фоновую: memory_file_save будет стейджить,
+/// а не писать в постоянную память. Вызывается до spawn фонового хода
+/// (thread_local — распространяется только на этот поток-исполнитель).
+pub fn mark_background() {
+    BACKGROUND_CONTEXT.with(|c| c.set(true));
+}
+
+/// Снять пометку фоновой задачи.
+pub fn clear_background() {
+    BACKGROUND_CONTEXT.with(|c| c.set(false));
+}
+
+/// Мы сейчас в фоновом контексте?
+pub fn is_background() -> bool {
+    BACKGROUND_CONTEXT.with(|c| c.get())
+}
+
+fn pending_memory_dir() -> PathBuf {
+    if let Ok(custom) = std::env::var("HEPHAESTUS_HOME") {
+        return PathBuf::from(custom).join("pending").join("memory");
+    }
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".hephaestus")
+        .join("pending")
+        .join("memory")
+}
+
+/// Каталог stейдж-записей (для /memory review).
+pub fn pending_memory_files() -> Vec<PathBuf> {
+    let dir = pending_memory_dir();
+    let mut out = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for e in entries.filter_map(|e| e.ok()) {
+            let p = e.path();
+            if p.extension().and_then(|x| x.to_str()) == Some("md") {
+                out.push(p);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Утвердить стейдж-запись: перенести в основную память + индекс.
+pub fn approve_pending(name: &str) -> Result<String, String> {
+    let safe: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    let src = pending_memory_dir().join(format!("{safe}.md"));
+    let content = std::fs::read_to_string(&src).map_err(|e| format!("нет stейдж-записи {safe}: {e}"))?;
+    let dir = memory_files_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join(format!("{safe}.md")), &content).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_file(&src);
+    rebuild_memory_index(&dir)?;
+    Ok(safe)
+}
+
+/// Отклонить стейдж-запись (удалить файл).
+pub fn reject_pending(name: &str) -> Result<(), String> {
+    let safe: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    let src = pending_memory_dir().join(format!("{safe}.md"));
+    std::fs::remove_file(&src).map_err(|e| format!("{safe}: {e}"))
+}
+
 /// memory_file_save — сохранить/обновить факт-файл.
 pub struct MemoryFileSaveTool;
 
@@ -486,6 +571,22 @@ impl Tool for MemoryFileSaveTool {
             desc.replace('\n', " "),
             content.trim()
         );
+        // СТЕЙДЖИНГ (write_approval-модель Hermes): фоновая задача
+        // (суб-агент, очередь) не пишет в постоянную память напрямую —
+        // запись уходит в pending/, пользователь утверждает /memory review.
+        if is_background() {
+            let pdir = pending_memory_dir();
+            if let Err(e) = std::fs::create_dir_all(&pdir) {
+                return ToolResult::error(format!("create_dir: {e}"));
+            }
+            if let Err(e) = std::fs::write(pdir.join(format!("{safe}.md")), &file_content) {
+                return ToolResult::error(format!("write: {e}"));
+            }
+            return ToolResult::success(format!(
+                "📋 Факт {safe} ПОМЕЩЕН НА УТВЕРЖДЕНИЕ (фоновая задача не пишет в память напрямую). \
+                 Пользователь увидит его в /memory review и перенесёт в постоянную память при согласии."
+            ));
+        }
         if let Err(e) = std::fs::write(dir.join(format!("{safe}.md")), &file_content) {
             return ToolResult::error(format!("write: {e}"));
         }

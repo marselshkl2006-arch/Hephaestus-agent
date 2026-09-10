@@ -220,10 +220,17 @@ If you changed files, say clearly what changed and show verification results.")
         let id2 = id.clone();
         let task2 = task.clone();
         tokio::spawn(async move {
+            // СТЕЙДЖИНГ ПАМЯТИ (write_approval-модель Hermes): суб-агент
+            // фоновый — его memory_file_save НЕ пишет в постоянную память
+            // напрямую, а кладёт запись в pending/ на утверждение
+            // (/memory approve в TUI). Пометка ставится здесь, внутри
+            // spawned-таска; thread_local живёт в этом таске-исполнителе.
+            crate::memory_tools::mark_background();
             // Изолированный агент: свой клиент + пустая история; инструменты/
             // права/директория — общие с основным.
             let mut sub = crate::Agent::build_sub_agent(&runner);
             let out = sub.chat(&task2, 12, true).await;
+            crate::memory_tools::clear_background();
             let (status, _) = if out.trim_start().starts_with("LLM error") {
                 ("error", ())
             } else {

@@ -1530,6 +1530,71 @@ async fn handle_command(
                 history.push(HistoryEntry::new(Role::System, "Агент занят — попробуйте ещё раз чуть позже."));
             }
         }
+        "memory" => {
+            // /memory            — список стейдж-записей фоновых задач
+            // /memory approve N  — перенести запись N в постоянную память
+            // /memory reject N   — отклонить
+            let args_str = cmd.strip_prefix("memory ").unwrap_or("");
+            let rest: Vec<&str> = args_str.split_whitespace().collect();
+            match rest.first().map(|s| *s) {
+                None => {
+                    let pending = crate::memory_tools::pending_memory_files();
+                    if pending.is_empty() {
+                        history.push(HistoryEntry::new(
+                            Role::System,
+                            "Нет записей на утверждении. Фоновые задачи (суб-агенты) пишут факты в память только после вашего /memory approve.",
+                        ));
+                    } else {
+                        let mut lines = vec![format!("📋 На утверждении ({}):", pending.len())];
+                        for (i, p) in pending.iter().enumerate() {
+                            let name = p.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
+                            let first = std::fs::read_to_string(p)
+                                .ok()
+                                .and_then(|t| {
+                                    t.lines().find(|l| l.starts_with("description:"))
+                                        .map(|d| d.trim_start_matches("description:").trim().to_string())
+                                })
+                                .unwrap_or_default();
+                            lines.push(format!("  {}. {} — {}", i + 1, name, first));
+                        }
+                        lines.push(String::new());
+                        lines.push("Утвердить: /memory approve <номер или имя>  Отклонить: /memory reject <номер или имя>".to_string());
+                        history.push(HistoryEntry::new(Role::System, lines.join("\n")));
+                    }
+                }
+                Some("approve") | Some("reject") => {
+                    let is_approve = rest.first() == Some(&"approve");
+                    let key = rest.get(1).copied().unwrap_or("");
+                    let pending = crate::memory_tools::pending_memory_files();
+                    let target: Option<String> = if let Ok(n) = key.parse::<usize>() {
+                        pending.get(n.saturating_sub(1)).and_then(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()))
+                    } else {
+                        pending
+                            .iter()
+                            .find(|p| p.file_stem().map(|s| s.to_string_lossy() == key).unwrap_or(false))
+                            .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()))
+                    };
+                    let Some(name) = target else {
+                        history.push(HistoryEntry::new(Role::Error, format!("Запись '{}' не найдена (см. /memory)", key)));
+                        return false;
+                    };
+                    if is_approve {
+                        match crate::memory_tools::approve_pending(&name) {
+                            Ok(_) => history.push(HistoryEntry::new(Role::System, format!("✅ Факт '{name}' перенесён в постоянную память."))),
+                            Err(e) => history.push(HistoryEntry::new(Role::Error, e)),
+                        }
+                    } else {
+                        match crate::memory_tools::reject_pending(&name) {
+                            Ok(_) => history.push(HistoryEntry::new(Role::System, format!("🗑 Факт '{name}' отклонён и удалён."))),
+                            Err(e) => history.push(HistoryEntry::new(Role::Error, e)),
+                        }
+                    }
+                }
+                Some(other) => {
+                    history.push(HistoryEntry::new(Role::Error, format!("Неизвестное действие /memory {other}. Доступно: (пусто) — список, approve N, reject N")));
+                }
+            }
+        }
         "undo" => {
             if busy {
                 history.push(HistoryEntry::new(Role::System, "Нельзя откатывать, пока агент работает — подождите завершения хода."));
