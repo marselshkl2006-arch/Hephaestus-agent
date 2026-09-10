@@ -163,6 +163,12 @@ impl StateDb {
     }
 
     fn build(conn: Connection, path: PathBuf) -> Result<Self, String> {
+        Self::build_pub(conn, path)
+    }
+
+    /// Публичная фабрика для тестов и модулей, которым нужен in-memory
+    /// стор с готовой схемой (integration_tests).
+    pub fn build_pub(conn: Connection, path: PathBuf) -> Result<Self, String> {
         conn.execute_batch(SCHEMA)
             .map_err(|e| format!("schema: {e}"))?;
         let db = Self {

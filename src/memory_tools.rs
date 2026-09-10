@@ -393,6 +393,10 @@ impl crate::tools::Tool for MemoryListTool {
 
 
 pub fn memory_files_dir() -> PathBuf {
+    // HEPHAESTUS_HOME уважается везде (изолированные тесты, кастомный хоум).
+    if let Ok(custom) = std::env::var("HEPHAESTUS_HOME") {
+        return PathBuf::from(custom).join("memory");
+    }
     let mut p = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     p.push(".hephaestus");
     p.push("memory");

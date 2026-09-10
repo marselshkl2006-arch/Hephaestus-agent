@@ -60,6 +60,8 @@ mod learning;
  mod tool_guard;
  mod watchdog;
  mod snapshots;
+#[cfg(test)]
+mod integration_tests;
 
 // НЕ подключены сознательно (пересмотрено в итерации 7 — caching.rs,
 // task_manager.rs и learning.rs, которые раньше здесь тоже упоминались,
@@ -114,12 +116,11 @@ fn recover_session(
     // Изначально считаем запуск потенциально аварийным: clean_shutdown
     // сбрасываем сразу. При штатном выходе repl вызовет mark_clean_shutdown.
     state.meta_set(state_db::meta_keys::CLEAN_SHUTDOWN, "0");
-    if clean.as_deref() != Some("1") {
-        let next = streak + 1;
-        state.meta_set(state_db::meta_keys::CRASH_STREAK, &next.to_string());
-    } else {
-        state.meta_set(state_db::meta_keys::CRASH_STREAK, "0");
-    }
+    let crashed = clean.as_deref() != Some("1");
+    // Инкремент ДО решения: streak — число крашей ВКЛЮЧАЯ этот запуск
+    // (иначе 3-й краш даёт streak=2 и эскалация опаздывает на один).
+    let streak = if crashed { streak + 1 } else { 0 };
+    state.meta_set(state_db::meta_keys::CRASH_STREAK, &streak.to_string());
 
     let last = state.last_session_id();
     let Some(last_id) = last else {
@@ -128,11 +129,14 @@ fn recover_session(
         return (state_db::SessionHandle::new(state.clone(), id), None);
     };
 
-    let crashed = clean.as_deref() != Some("1");
+    // Три аварийных старта подряд → контент сессии подозрителен → новый лист.
     let force_fresh = crashed && streak >= 3;
 
     if !crashed || force_fresh {
         if force_fresh {
+            // Эскалация сработала — счётчик обнулён: следующему крашу нужно
+            // снова 3 подряд, чтобы принудительно сбросить.
+            state.meta_set(state_db::meta_keys::CRASH_STREAK, "0");
             state.set_resume_pending(last_id, false);
             let id = state.new_session(provider, model);
             return (
