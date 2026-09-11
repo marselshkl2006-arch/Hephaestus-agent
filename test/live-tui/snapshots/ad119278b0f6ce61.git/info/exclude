@@ -1,0 +1,13 @@
+.git
+target/
+node_modules/
+.venv/
+venv/
+__pycache__/
+dist/
+build/
+Cargo.lock
+package-lock.json
+poetry.lock
+/test/live-tui/
+/test/live-tui/snapshots/ad119278b0f6ce61.git/

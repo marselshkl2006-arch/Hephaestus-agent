@@ -155,14 +155,10 @@ fn now_str() -> String {
 
 impl StateDb {
     /// Дефолтный путь: `$HEPHAESTUS_HOME/state.db` либо `~/.hephaestus/state.db`.
+    /// Через bootstrap::hephaestus_home — тот абсолютизирует относительный
+    /// HEPHAESTUS_HOME (иначе путь зависел бы от CWD процесса).
     pub fn default_path() -> PathBuf {
-        if let Ok(custom) = std::env::var("HEPHAESTUS_HOME") {
-            return PathBuf::from(custom).join("state.db");
-        }
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".hephaestus")
-            .join("state.db")
+        crate::bootstrap::hephaestus_home().join("state.db")
     }
 
     pub fn open_default() -> std::sync::Arc<Self> {
@@ -193,7 +189,8 @@ impl StateDb {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
         let conn = Connection::open(path).map_err(|e| e.to_string())?;
-        Self::build(conn, path.clone())
+        let r = Self::build(conn, path.clone());
+        r
     }
 
     fn build(conn: Connection, path: PathBuf) -> Result<Self, String> {

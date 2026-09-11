@@ -20,7 +20,17 @@ pub const README: &str = include_str!("../assets/README.first-run.md");
 /// Каталог данных (учитывает HEPHAESTUS_HOME).
 pub fn hephaestus_home() -> PathBuf {
     if let Ok(custom) = std::env::var("HEPHAESTUS_HOME") {
-        return PathBuf::from(custom);
+        let p = PathBuf::from(&custom);
+        if p.is_absolute() {
+            return p;
+        }
+        // ФИКС (найден живым TUI-прогоном): относительный HEPHAESTUS_HOME
+        // ломал Path::strip_prefix в snapshots::write_excludes — исключения
+        // не писались, снапшот включал сам себя и state.db, undo их удалял.
+        // Привязываем к cwd, чтобы путь был абсолютным при любом CWD.
+        return std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(p);
     }
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))

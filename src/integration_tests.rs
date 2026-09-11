@@ -30,13 +30,18 @@ mod security_integration {
     }
 
     #[test]
-    fn ordinary_rm_is_not_high_risk() {
-        // Регрессия: раньше `\brm\b` ловил любой rm — обычное удаление
-        // файла требовало force и роняло ход.
+    fn ordinary_rm_requires_confirmation() {
+        // ИЗМЕНЕНО ПО ЖИВОМУ ПРОГОНУ (TUI, pty): rm файла был Low и агент
+        // молча удалял файлы без вопроса. Теперь rm-семейство = High →
+        // подтверждение у человека (см. security.rs). mv остаётся Low:
+        // это перемещение, а не удаление.
         let v = validator();
         let check = v.check_bash_command("rm build.log");
         assert!(check.allowed);
-        assert!(check.risk as i32 <= ActionRisk::Low as i32);
+        assert_eq!(check.risk, ActionRisk::High);
+        let check = v.check_bash_command("rmdir empty_dir");
+        assert!(check.allowed);
+        assert_eq!(check.risk, ActionRisk::High);
         let check = v.check_bash_command("mv a.txt b.txt");
         assert!(check.allowed);
         assert!(check.risk as i32 <= ActionRisk::Low as i32);

@@ -98,8 +98,22 @@ fn write_excludes(shadow: &Path, workdir: &Path) {
         ".git\ntarget/\nnode_modules/\n.venv/\nvenv/\n__pycache__/\ndist/\nbuild/\nCargo.lock\npackage-lock.json\npoetry.lock\n",
     );
     // HEPHAESTUS_HOME относительно work-tree → gitignore-паттерн от корня.
-    let home = crate::bootstrap::hephaestus_home();
-    if let Ok(rel) = home.strip_prefix(workdir) {
+    // Обе стороны абсолютизируем: если HEPHAESTUS_HOME/workdir относительны,
+    // strip_prefix молча давал Err и исключения не попадали в файл —
+    // снапшот включал сам себя и state.db, undo их удалял (живой инцидент).
+    fn abs(p: &Path) -> PathBuf {
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(p)
+        }
+    }
+    let home_abs = abs(&crate::bootstrap::hephaestus_home());
+    let work_abs = abs(workdir);
+    let shadow_abs = abs(shadow);
+    if let Ok(rel) = home_abs.strip_prefix(&work_abs) {
         let rel_str = rel.to_string_lossy();
         if !rel_str.is_empty() {
             exclude.push_str(&format!("/{}/\n", rel_str.trim_end_matches('/')));
@@ -107,7 +121,7 @@ fn write_excludes(shadow: &Path, workdir: &Path) {
     }
     // Сам теневой репо тоже мог оказаться внутри work-tree при любом
     // другом размещении snapshots_dir.
-    if let Ok(rel) = shadow.strip_prefix(workdir) {
+    if let Ok(rel) = shadow_abs.strip_prefix(&work_abs) {
         exclude.push_str(&format!("/{}/\n", rel.to_string_lossy().trim_end_matches('/')));
     }
     let _ = std::fs::write(info.join("exclude"), exclude);
@@ -189,6 +203,15 @@ impl SnapshotManager {
                 }
             }
         }
+    }
+
+    /// Текущий статус work-tree против последнего снимка — для тестов
+    /// (проверка самоснапшота) и диагностики.
+    pub fn status_porcelain(&self) -> Result<String, String> {
+        self.check_available()?;
+        let shadow = shadow_repo_for(&self.workdir);
+        ensure_repo(&shadow, &self.workdir)?;
+        run_git(&shadow, &self.workdir, &["status", "--porcelain"])
     }
 
     /// Откат последнего хода: modified/deleted — из снимка HEAD, новые
@@ -324,6 +347,44 @@ mod tests {
             return;
         }
         assert!(mgr.undo_last().is_err());
+    }
+
+    /// ЖИВОЙ ИНЦИДЕНТ (TUI-прогон, pty): HEPHAESTUS_HOME был ОТНОСИТЕЛЬНЫМ
+    /// ("test/live-tui") — Path::strip_prefix(абсолютный workdir) давал Err,
+    /// исключения не писались, снапшот включал сам себя и state.db, а undo
+    /// УДАЛЯЛ их («Удалено: snapshots/...objects/...»). Абсолютизация в
+    /// hephaestus_home() и write_excludes обязана это лечить.
+    #[test]
+    fn relative_home_inside_worktree_is_excluded() {
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let outer = tempfile::TempDir::new().unwrap();
+        let workdir = outer.path().join("project");
+        std::fs::create_dir_all(&workdir).unwrap();
+        std::fs::write(workdir.join("a.txt"), "v\n").unwrap();
+        // ОТНОСИТЕЛЬНЫЙ home — как в реальном прогоне pty-драйвера.
+        let prev_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&workdir).unwrap();
+        std::env::set_var("HEPHAESTUS_HOME", "data");
+
+        let mgr = SnapshotManager::new(workdir.clone());
+        if !mgr.is_available() {
+            std::env::remove_var("HEPHAESTUS_HOME");
+            let _ = std::env::set_current_dir(prev_cwd);
+            return;
+        }
+        mgr.snapshot_before_turn("t1");
+        let shadow = shadow_repo_for(&workdir);
+        let exclude = std::fs::read_to_string(shadow.join("info/exclude")).unwrap();
+        assert!(exclude.contains("/data/"), "относительный home не исключён: {exclude}");
+
+        // Содержимое home (state.db, snapshots) не должно попадать в снимок.
+        let status = mgr.status_porcelain().unwrap_or_default();
+        assert!(
+            !status.contains("data/"),
+            "снапшот видит содержимое home: {status}"
+        );
+        std::env::remove_var("HEPHAESTUS_HOME");
+        let _ = std::env::set_current_dir(prev_cwd);
     }
 
     /// РЕГРЕССИЯ экспоненциальных снапшотов (инцидент: 83 ГБ, oom-killer):

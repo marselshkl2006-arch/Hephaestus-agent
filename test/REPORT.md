@@ -76,3 +76,38 @@ diagram pub-структуры.
 файлы, шелл, БД (3 СУБД + Redis), документы/презентации, память/скиллы,
 permissions-as-data (audit trail), recovery, сессии, MCP, git, web, кэш,
 планы, фоновые задачи, векторный поиск.
+
+## Реальное время: TUI через pty (итоговая серия pty3–pty7)
+
+Прогон: `test/pty_driver.py` (реальный терминал 120×40, сценарий test/tui-scenario.txt,
+живой LLM nvidia/nemotron-3-super-120b-a12b), проверка экрана/лога: `test/check_tui.py` (pyte).
+
+### Итог: 10/11 контрольных точек (pty7)
+Рамка «Диалог», промпт ввода, file_write, diff-блок, **вопрос разрешения**,
+**/allow**, **Esc-прерывание**, /undo, /sessions, /toolcalls — ✅.
+«Ошибка LLM» — N/A (в pty7 ошибок не было; отображение ошибок подтверждено в pty5/451).
+
+### Найдено и исправлено ЖИВЬЁМ (юнит-тесты это ловить не могли)
+1. **Дедлок старта TUI** (repl.rs): два `agent.lock().await` в одном выражении
+   миграции session.json → TUI навсегда зависал до первого кадра.
+2. **Undo уничтожал state.db и снапшоты** (snapshots.rs/bootstrap.rs):
+   относительный HEPHAESTUS_HOME → `strip_prefix` давал Err → исключения
+   info/exclude не писались → снапшот включал сам себя + state.db, undo их удалял.
+   Фикс: `hephaestus_home()` абсолютизирует путь; обе стороны strip_prefix
+   абсолютизируются. Регресс-тест `relative_home_inside_worktree_is_excluded`.
+3. **`rm файл` проходил без подтверждения** (security.rs): rm-семейство было Low;
+   теперь High → вопрос. Старый тест `ordinary_rm_is_not_high_risk` кодифицировал
+   баг — заменён на `ordinary_rm_requires_confirmation`.
+4. **Esc не прерывал ход** (repl.rs): для ходов через очередь busy=false →
+   Esc чистил ввод. Теперь `busy || queued_pending > 0`; плюс LLM-вызов
+   обёрнут в `tokio::select!` c `interrupt::wait_interrupt` — блокирующий
+   вызов (custom-провайдеры) рвётся по Esc.
+5. **Аудит разрешений не писался** (bash_tool/db_universal/file_tools):
+   risk-based и rule-based asks теперь пишут granted/denied в permission_log.
+6. **Двойное вложение логов** (logging/learning при HEPHAESTUS_HOME) —
+   логи уезжали в `$HOME/.hephaestus/logs` вместо `$HEPHAESTUS_HOME/logs`.
+
+### Проверено живьём ранее в этой серии
+- nvidia API:间歇ный HTTP 451 (geo-флап) — агент переживает, ошибки отображаются.
+- ollama: num_ctx 4096 мало для системного промпта → HTTP 400 (задокументировано).
+- state.db: 12 таблиц, инкрементальная запись user/tool/assistant подтверждена.

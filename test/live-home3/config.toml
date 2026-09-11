@@ -25,3 +25,8 @@ action = "allow"
 url = "sqlite:///home/marsel/projects/Hephaestus-agent/Hephaestus-agent-rs/test/results/e2e.db?mode=rwc"
 read_only = false
 description = "тестовая база e2e"
+
+[databases.redis-e2e]
+url = "redis://127.0.0.1:56379/0"
+read_only = false
+description = "живой redis"

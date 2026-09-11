@@ -187,8 +187,11 @@ impl Tool for DbQueryTool {
                         .request("db_write", &format!("SQL-запись в базу '{name}': {}", crate::truncate_chars(sql, 120)), "", &format!("db:{name}"))
                         .await
                     {
-                        Outcome::Granted => {}
+                        Outcome::Granted => {
+                            self.engine.audit_decision("db_write", &name, "granted", "ask-interactive");
+                        }
                         Outcome::Denied => {
+                            self.engine.audit_decision("db_write", &name, "denied", "ask-interactive");
                             return ToolResult::error("🚫 Пользователь ОТКЛОНИЛ запись в базу.");
                         }
                         Outcome::Expired => {

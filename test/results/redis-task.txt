@@ -1,0 +1,2 @@
+Через db_redis на подключении redis-e2e выполни: SET greeting "привет из Гефеста", затем GET greeting, затем KEYS *. Скажи ровно, что вернул GET.
+exit

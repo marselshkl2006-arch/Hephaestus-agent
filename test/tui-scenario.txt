@@ -1,0 +1,23 @@
+# Сценарий реальной TUI-сессии: дифф, permission-ask, Esc, undo
+WAIT 6
+TYPE Создай файл test/results/tui-file.txt через file_write с текстом TUI-LIVE
+WAIT 150
+TYPE Добавь в конец файла test/results/tui-file.txt строку SECOND-LINE через file_edit (old_text: TUI-LIVE, new_text: TUI-LIVE
+SECOND-LINE)
+WAIT 150
+TYPE Удали файл test/results/tui-file.txt через bash команду rm
+WAIT 60
+TYPE /allow once
+WAIT 60
+TYPE Напиши эссе на 50 абзацев о природе времени
+WAIT 12
+KEY \x1b
+WAIT 20
+TYPE /undo
+WAIT 30
+TYPE /sessions
+WAIT 10
+TYPE /toolcalls
+WAIT 10
+TYPE /exit
+WAIT 5

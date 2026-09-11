@@ -108,8 +108,11 @@ impl Tool for BashTool {
                         "запрошено правилом permissions (ask)",
                         &always_key,
                     ).await {
-                        Outcome::Granted => {}
+                        Outcome::Granted => {
+                            self.engine.audit_decision("bash", command, "granted", "ask-interactive");
+                        }
                         Outcome::Denied => {
+                            self.engine.audit_decision("bash", command, "denied", "ask-interactive");
                             return ToolResult::error(format!(
                                 "🚫 Пользователь ОТКЛОНИЛ команду. Не повторяй её без обсуждения — спроси, как действовать иначе.\nКоманда: {}",
                                 command
@@ -143,8 +146,11 @@ impl Tool for BashTool {
                         .trim()
                         .to_string();
                         match self.permissions.request("bash", &summary, &reason, &always_key).await {
-                            Outcome::Granted => {}
+                            Outcome::Granted => {
+                                self.engine.audit_decision("bash", command, "granted", "risk-interactive");
+                            }
                             Outcome::Denied => {
+                                self.engine.audit_decision("bash", command, "denied", "risk-interactive");
                                 return ToolResult::error(format!(
                                     "🚫 Пользователь ОТКЛОНИЛ команду. Не повторяй её без обсуждения — спроси, как действовать иначе.\nКоманда: {}",
                                     command

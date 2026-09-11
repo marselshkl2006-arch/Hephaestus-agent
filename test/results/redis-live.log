@@ -1,0 +1,8 @@
+⚡ Гефест — AI Coding Agent (Rust) [простой режим]
+Введите ваш запрос (или 'exit' для выхода):
+
+> 
+[31mERROR: LLM error: custom/nvidia/nemotron-3-super-120b-a12b/chat[0m
+LLM error (⚙️ Ошибка выполнения API error: HTTP 500 Internal Server Error: Internal server error): API error: HTTP 500 Internal Server Error: Internal server error
+
+> 

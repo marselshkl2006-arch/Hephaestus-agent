@@ -57,6 +57,16 @@
       ],
       "context": "custom/nvidia/nemotron-3-super-120b-a12b",
       "ts": "2026-09-11T12:03:19"
+    },
+    {
+      "tool": "db_redis",
+      "params_keys": [
+        "connection",
+        "args",
+        "command"
+      ],
+      "context": "custom/nvidia/nemotron-3-super-120b-a12b",
+      "ts": "2026-09-11T13:31:29"
     }
   ],
   "failures": [

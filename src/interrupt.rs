@@ -19,6 +19,25 @@ pub fn interrupt() {
     INTERRUPT_EPOCH.fetch_add(1, Ordering::SeqCst);
 }
 
+/// Текущая эпоха — для tokio::select! вокруг блокирующих await.
+pub fn current_epoch() -> u64 {
+    INTERRUPT_EPOCH.load(Ordering::SeqCst)
+}
+
+/// Ждать прерывания хода: резолвится, как только эпоха уедет от `epoch`.
+/// Живой инцидент (TUI + nvidia): стрим для custom-провайдеров выключен,
+/// эссе шло ОДНИМ блокирующим HTTP-вызовом — Esc не мог ничего прервать,
+/// пока вызов не завершится сам. Теперь LLM-вызов оборачивается в
+/// `tokio::select!` с этим ожиданием: дроп future = отмена HTTP-запроса.
+pub async fn wait_interrupt(epoch: u64) {
+    loop {
+        if INTERRUPT_EPOCH.load(Ordering::SeqCst) != epoch {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
 /// Маркер хода: снимок эпохи на старте.
 #[derive(Debug)]
 pub struct InterruptGuard {
@@ -33,6 +52,11 @@ impl InterruptGuard {
     /// true — ход прерван после старта (эпоха уехала вперёд).
     pub fn is_interrupted(&self) -> bool {
         INTERRUPT_EPOCH.load(Ordering::SeqCst) != self.epoch
+    }
+
+    /// Снимок эпохи — для select!-абортов длинных await (см. wait_interrupt).
+    pub fn epoch(&self) -> u64 {
+        self.epoch
     }
 }
 

@@ -202,6 +202,15 @@ impl SecurityValidator {
             return SecurityCheck::allowed(ActionRisk::Safe);
         }
 
+        // ФИКС (живой TUI-прогон): `rm файл` проходил как Low — вопрос
+        // подтверждения задавался только для High/Critical, и агент молча
+        // удалял файлы. Удаление пользовательских данных — High.
+        if matches!(cmd_name, "rm" | "rmdir" | "shred" | "unlink") {
+            return SecurityCheck::allowed(ActionRisk::High)
+                .with_warning("⚠️ УДАЛЕНИЕ ФАЙЛОВ")
+                .with_reason("Команда удаляет файлы/каталоги");
+        }
+
         SecurityCheck::allowed(ActionRisk::Low)
     }
 

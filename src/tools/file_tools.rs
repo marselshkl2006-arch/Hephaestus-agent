@@ -206,10 +206,16 @@ async fn guard_file_op(
                 ));
             };
             match pm.request(tool, &format!("{tool}: {display_path}"), "файл помечен правилом как чувствительный (ask)", key).await {
-                Outcome::Granted => Ok(()),
-                Outcome::Denied => Err(format!(
-                    "🚫 Пользователь ОТКЛОНИЛ {tool} над {display_path}. Уточни, как действовать."
-                )),
+                Outcome::Granted => {
+                    engine.audit_decision(tool, key, "granted", "ask-interactive");
+                    Ok(())
+                }
+                Outcome::Denied => {
+                    engine.audit_decision(tool, key, "denied", "ask-interactive");
+                    Err(format!(
+                        "🚫 Пользователь ОТКЛОНИЛ {tool} над {display_path}. Уточни, как действовать."
+                    ))
+                }
                 Outcome::Expired => Err(format!(
                     "⏳ Нет ответа на запрос {tool} за 3 минуты — отменено ({display_path})."
                 )),
@@ -623,8 +629,11 @@ impl Tool for FileDeleteTool {
                         .request("file_delete", &format!("удалить файл {}", path.display()), "", "file_delete")
                         .await;
                     match outcome {
-                        Outcome::Granted => {}
+                        Outcome::Granted => {
+                            self.engine.audit_decision("file_delete", &path.display().to_string(), "granted", "ask-interactive");
+                        }
                         Outcome::Denied => {
+                            self.engine.audit_decision("file_delete", &path.display().to_string(), "denied", "ask-interactive");
                             return ToolResult::error(format!(
                                 "🚫 Пользователь ОТКЛОНИЛ удаление {}. Уточни, как действовать.",
                                 path.display()

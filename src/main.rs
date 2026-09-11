@@ -730,21 +730,29 @@ impl Agent {
                     attempt += 1;
                     // WATCHDOG: старт LLM-вызова — веха живости.
                     crate::watchdog::bump("llm-call-start");
-                    let call = if stream_supported {
-                        self.llm.complete_with_tools_stream(
-                            &messages,
-                            &tool_schemas_holder,
-                            Some(system_prompt.as_str()),
-                            std::sync::Arc::clone(&on_text),
-                        )
-                        .await
-                    } else {
-                        self.llm.complete_with_tools(
-                            &messages,
-                            &tool_schemas_holder,
-                            Some(system_prompt.as_str()),
-                        )
-                        .await
+                    // ABORT ПО ESC (interrupt.rs): блокирующий вызов
+                    // (custom-провайдеры без стрима) теперь отменяем —
+                    // дроп future рвёт HTTP-запрос. Без этого Esc во время
+                    // длинного ответа молча ждал его завершения (живой
+                    // инцидент: эссе через nvidia).
+                    let call = tokio::select! {
+                        r = if stream_supported {
+                            Box::pin(self.llm.complete_with_tools_stream(
+                                &messages,
+                                &tool_schemas_holder,
+                                Some(system_prompt.as_str()),
+                                std::sync::Arc::clone(&on_text),
+                            )) as std::pin::Pin<Box<dyn std::future::Future<Output = Result<crate::llm::LLMResponse, crate::llm::LLMError>> + Send>>
+                        } else {
+                            Box::pin(self.llm.complete_with_tools(
+                                &messages,
+                                &tool_schemas_holder,
+                                Some(system_prompt.as_str()),
+                            )) as std::pin::Pin<Box<dyn std::future::Future<Output = Result<crate::llm::LLMResponse, crate::llm::LLMError>> + Send>>
+                        } => r,
+                        _ = crate::interrupt::wait_interrupt(interrupt_guard.epoch()) => {
+                            Err(crate::llm::LLMError::Api("прервано пользователем (Esc)".to_string()))
+                        }
                     };
                     match call {
                         Ok(r) => {
@@ -774,6 +782,12 @@ impl Agent {
                         Err(e) => {
                             let msg = e.to_string();
                             self.metrics.llm_errors.fetch_add(1, Ordering::Relaxed);
+                            // ПРЕРЫВАНИЕ (Esc): никакой ретрай/компресс —
+                            // пользователь явно сказал «стоп».
+                            if interrupt_guard.is_interrupted() || msg.contains("прервано пользователем") {
+                                logging_system::info("[interrupt] ход прерван во время LLM-вызова");
+                                return "⏹ Прервано (Esc).".to_string();
+                            }
                             let category = crate::error_handler::classify_llm(&msg);
                             // Compress-and-retry: переполнение окна лечим
                             // сжатием — но только ОДИН раз за ход, иначе

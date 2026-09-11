@@ -1,0 +1,17 @@
+provider = "custom"
+model = "nvidia/nemotron-3-super-120b-a12b"
+base_url = "https://integrate.api.nvidia.com/v1"
+custom_api_key_env = "NVIDIA_API_KEY"
+
+[extra_headers]
+Accept = "application/json"
+User-Agent = "hephaestus-rs"
+
+[extra_body]
+temperature = 0.2
+max_tokens = 2048
+
+[[permissions.rules]]
+tool = "bash"
+pattern = "echo *"
+action = "allow"

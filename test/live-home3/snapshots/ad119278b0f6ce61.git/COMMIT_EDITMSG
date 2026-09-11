@@ -1,1 +1,1 @@
-before turn: Задача V: background_run tool="bash" args={command:"echo BG-
+before turn: Через db_redis на подключении redis-e2e выполни: SET greetin

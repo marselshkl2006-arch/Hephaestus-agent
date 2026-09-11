@@ -256,9 +256,21 @@ async fn run_app(
     // Legacy-миграция: БД пуста, но старый session.json существует и ещё
     // не переносился — переносим его содержимое в канонический стор один
     // раз. Сам файл НЕ удаляем (остаётся бэкапом пользователя).
-    {
-        let migrated = agent.lock().await.state.meta_get(crate::state_db::meta_keys::JSON_MIGRATED);
-        let db_empty = agent.lock().await.state.count_messages(agent.lock().await.session_id()) == 0;
+    //
+    // ДЕДЛОК-ФИКС (найден живым pty-тестом): раньше здесь было
+    // `agent.lock().await.state.count_messages(agent.lock().await.session_id())`
+    // — ДВА лока в одном операторе; tokio Mutex не reentrant, первый guard
+    // живёт до конца выражения, второй ждёт его вечно → TUI зависал при
+    // старте (первый кадр никогда не рисовался).
+    let migrated = {
+        let a = agent.lock().await;
+        a.state.meta_get(crate::state_db::meta_keys::JSON_MIGRATED)
+    };
+    let db_empty = {
+        let a = agent.lock().await;
+        let sid = a.session_id();
+        a.state.count_messages(sid) == 0
+    };
         if migrated.is_none() && db_empty {
             if let Some(saved) = session_store::load() {
                 if !saved.messages.is_empty() {
@@ -283,7 +295,6 @@ async fn run_app(
                 agent.lock().await.state.meta_set(crate::state_db::meta_keys::JSON_MIGRATED, "1");
             }
         }
-    }
 
     history.push(HistoryEntry::new(
         Role::System,
@@ -870,7 +881,11 @@ async fn run_app(
                                 // ДВОЙНАЯ РОЛЬ ESC: если агент занят —
                                 // ПРЕРВАТЬ ХОД (как в opencode/CC); иначе —
                                 // очистить ввод/выделение, как раньше.
-                                if busy {
+                                // ФИКС (живой pty-прогон): обычные ходы идут
+                                // через очередь и живут в queued_pending,
+                                // busy остаётся false (это только /goal) —
+                                // Esc молча чистил ввод и НЕ прерывал.
+                                if busy || queued_pending > 0 {
                                     crate::interrupt::interrupt();
                                     history.push(HistoryEntry::new(
                                         Role::System,
