@@ -108,6 +108,6 @@ permissions-as-data (audit trail), recovery, сессии, MCP, git, web, кэш
    логи уезжали в `$HOME/.hephaestus/logs` вместо `$HEPHAESTUS_HOME/logs`.
 
 ### Проверено живьём ранее в этой серии
-- nvidia API:间歇ный HTTP 451 (geo-флап) — агент переживает, ошибки отображаются.
+- nvidia API:интермиттентный (флапающий) HTTP 451 (geo-флап) — агент переживает, ошибки отображаются.
 - ollama: num_ctx 4096 мало для системного промпта → HTTP 400 (задокументировано).
 - state.db: 12 таблиц, инкрементальная запись user/tool/assistant подтверждена.
