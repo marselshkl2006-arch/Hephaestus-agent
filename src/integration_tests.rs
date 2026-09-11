@@ -464,10 +464,9 @@ mod memory_staging_integration {
 
     /// Тесты этого модуля меняют общий процессный стейт (env var +
     /// thread_local фон) — сериализуем их одним мьютексом.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn isolated_home() -> (std::sync::MutexGuard<'static, ()>, tempfile::TempDir) {
-        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::TempDir::new().unwrap();
         std::env::set_var("HEPHAESTUS_HOME", tmp.path());
         (guard, tmp)
@@ -482,13 +481,16 @@ mod memory_staging_integration {
     /// approve переносит, reject удаляет.
     #[test]
     fn background_write_stages_then_approves() {
+        // Уникальное имя на прогон: защита от env-гонок с параллельными
+        // тестами (общий index читается из какого-либо home).
+        let uniq = format!("fact-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos());
         let (_g, _tmp) = isolated_home();
 
         memory_tools::mark_background();
         // Эмулируем вызов инструмента.
         let tool = memory_tools::MemoryFileSaveTool;
         let res = futures_executor_block(tool.execute(&serde_json::json!({
-            "name": "test-fact",
+            "name": &uniq,
             "type": "project",
             "description": "тест",
             "content": "тело факта"
@@ -497,22 +499,24 @@ mod memory_staging_integration {
         assert!(res.output.contains("УТВЕРЖДЕНИЕ") || res.output.contains("утверждение"),
             "фон должен стейджить: {}", res.output);
         // Основная память НЕ тронута.
-        assert!(!memory_tools::memory_index_lines().contains("test-fact"));
+        assert!(!memory_tools::memory_index_lines().contains(&uniq));
         assert_eq!(memory_tools::pending_memory_files().len(), 1);
 
         // approve — переносит в основную.
-        let approved = memory_tools::approve_pending("test-fact").unwrap();
-        assert_eq!(approved, "test-fact");
-        assert!(memory_tools::memory_index_lines().contains("test-fact"));
+        let approved = memory_tools::approve_pending(&uniq).unwrap();
+        assert_eq!(approved, uniq);
+        assert_eq!(approved, uniq);
+        assert!(memory_tools::memory_index_lines().contains(&uniq));
         assert!(memory_tools::pending_memory_files().is_empty());
 
         // reject — удаляет.
+        let bad_uniq = format!("bad-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos());
         memory_tools::mark_background();
         let _ = futures_executor_block(tool.execute(&serde_json::json!({
-            "name": "bad-fact", "type": "project", "description": "мусор", "content": "x"
+            "name": &bad_uniq, "type": "project", "description": "мусор", "content": "x"
         })));
         assert_eq!(memory_tools::pending_memory_files().len(), 1);
-        memory_tools::reject_pending("bad-fact").unwrap();
+        memory_tools::reject_pending(&bad_uniq).unwrap();
         assert!(memory_tools::pending_memory_files().is_empty());
 
         cleanup();
@@ -522,15 +526,16 @@ mod memory_staging_integration {
     #[test]
     fn interactive_write_goes_straight_to_memory() {
         let (_g, _tmp) = isolated_home();
+        let direct_uniq = format!("direct-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos());
         memory_tools::clear_background();
 
         let tool = memory_tools::MemoryFileSaveTool;
         let res = futures_executor_block(tool.execute(&serde_json::json!({
-            "name": "direct-fact", "type": "user", "description": "напрямую", "content": "y"
+            "name": &direct_uniq, "type": "user", "description": "напрямую", "content": "y"
         })));
         assert!(res.success, "{}", res.error.unwrap_or_default());
         assert!(res.output.contains("сохранён"));
-        assert!(memory_tools::memory_index_lines().contains("direct-fact"));
+        assert!(memory_tools::memory_index_lines().contains(&direct_uniq));
         cleanup();
     }
 

@@ -64,6 +64,9 @@ fn run_git(shadow: &Path, workdir: &Path, args: &[&str]) -> Result<String, Strin
 
 fn ensure_repo(shadow: &Path, workdir: &Path) -> Result<(), String> {
     if shadow.join("HEAD").exists() {
+        // Exclude дописываем и для СУЩЕСТВУЮЩЕГО репо: путь HEPHAESTUS_HOME
+        // мог появиться/сместиться относительно work-tree.
+        write_excludes(shadow, workdir);
         return Ok(());
     }
     if let Some(parent) = shadow.parent() {
@@ -77,14 +80,37 @@ fn ensure_repo(shadow: &Path, workdir: &Path) -> Result<(), String> {
     if !out.status.success() {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
-    // Исключения: .git самого проекта и тяжёлые артефакты. Это ОТДЕЛЬНЫЙ
-    // репозиторий — пользовательский .gitignore не читается.
-    let info = shadow.join("info");
-    let _ = std::fs::create_dir_all(&info);
-    let exclude = ".git\ntarget/\nnode_modules/\n.venv/\nvenv/\n__pycache__/\ndist/\nbuild/\nCargo.lock\npackage-lock.json\npoetry.lock\n";
-    std::fs::write(info.join("exclude"), exclude).map_err(|e| e.to_string())?;
+    write_excludes(shadow, workdir);
     let _ = run_git(shadow, workdir, &["config", "core.autocrlf", "false"]);
     Ok(())
+}
+
+/// Исключения теневого снапшота. КРИТИЧНО: если HEPHAESTUS_HOME оказался
+/// ВНУТРИ work-tree (например, тестовый стенд или пользователь задал
+/// HEPHAESTUS_HOME внутри проекта), снапшоты начинали включать СЕБЯ ЖЕ:
+/// каждый ход коммитил объекты предыдущих снапшотов → экспоненциальный
+/// рост (реальный инцидент: 83 ГБ и oom-killer на git с 12 ГБ RSS).
+/// Также state.db/WAL/логи — живые файлы, снапшотить их бессмысленно.
+fn write_excludes(shadow: &Path, workdir: &Path) {
+    let info = shadow.join("info");
+    let _ = std::fs::create_dir_all(&info);
+    let mut exclude = String::from(
+        ".git\ntarget/\nnode_modules/\n.venv/\nvenv/\n__pycache__/\ndist/\nbuild/\nCargo.lock\npackage-lock.json\npoetry.lock\n",
+    );
+    // HEPHAESTUS_HOME относительно work-tree → gitignore-паттерн от корня.
+    let home = crate::bootstrap::hephaestus_home();
+    if let Ok(rel) = home.strip_prefix(workdir) {
+        let rel_str = rel.to_string_lossy();
+        if !rel_str.is_empty() {
+            exclude.push_str(&format!("/{}/\n", rel_str.trim_end_matches('/')));
+        }
+    }
+    // Сам теневой репо тоже мог оказаться внутри work-tree при любом
+    // другом размещении snapshots_dir.
+    if let Ok(rel) = shadow.strip_prefix(workdir) {
+        exclude.push_str(&format!("/{}/\n", rel.to_string_lossy().trim_end_matches('/')));
+    }
+    let _ = std::fs::write(info.join("exclude"), exclude);
 }
 
 pub struct SnapshotManager {
@@ -298,5 +324,53 @@ mod tests {
             return;
         }
         assert!(mgr.undo_last().is_err());
+    }
+
+    /// РЕГРЕССИЯ экспоненциальных снапшотов (инцидент: 83 ГБ, oom-killer):
+    /// если HEPHAESTUS_HOME (и теневой репо) лежат ВНУТРИ work-tree,
+    /// они обязаны быть в exclude — снапшот не включает сам себя.
+    #[test]
+    fn home_inside_worktree_is_excluded() {
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let outer = tempfile::TempDir::new().unwrap();
+        let workdir = outer.path().join("project");
+        let home = outer.path().join("project/data"); // HEPHAESTUS_HOME ВНУТРИ
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&workdir).unwrap();
+        std::fs::write(workdir.join("a.txt"), "v\n").unwrap();
+        std::env::set_var("HEPHAESTUS_HOME", &home);
+
+        let mgr = SnapshotManager::new(workdir.clone());
+        if !mgr.is_available() {
+            std::env::remove_var("HEPHAESTUS_HOME");
+            return;
+        }
+        mgr.snapshot_before_turn("t1");
+        // Репо создан по пути home/snapshots; exclude должен содержать /data/.
+        let shadow = shadow_repo_for(&workdir);
+        let exclude = std::fs::read_to_string(shadow.join("info/exclude")).unwrap();
+        assert!(exclude.contains("/data/"), "exclude: {exclude}");
+        assert!(exclude.contains("/data/snapshots/") || exclude.contains("/data/"),
+            "snapshots исключены: {exclude}");
+
+        // И главное: объекты репо НЕ растут от повторных снапшотов пустого
+        // дерева (нет самоснапшота — иначе размер рос бы лавиной).
+        let before = dir_size(&shadow);
+        for i in 0..3 {
+            mgr.snapshot_before_turn(&format!("t{i}"));
+        }
+        let after = dir_size(&shadow);
+        std::env::remove_var("HEPHAESTUS_HOME");
+        assert!(after <= before + 100_000, "рост снапшотов без изменений файлов: {before} → {after}");
+    }
+
+    fn dir_size(p: &Path) -> u64 {
+        walkdir::WalkDir::new(p)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter_map(|e| e.metadata().ok())
+            .filter(|m| m.is_file())
+            .map(|m| m.len())
+            .sum()
     }
 }

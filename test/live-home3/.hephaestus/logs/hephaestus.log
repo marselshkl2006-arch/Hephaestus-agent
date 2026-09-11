@@ -1,0 +1,39 @@
+2026-09-11 17:58:03 | ERROR | LLM error: custom/nvidia/nemotron-3-super-120b-a12b/chat [error=API error: HTTP 500 Internal Server Error: Internal server error]
+2026-09-11 17:58:13 | INFO | [llm] ход: tool_calls=1 content_len=0 head=""
+2026-09-11 17:58:13 | INFO | LLM request: custom/nvidia/nemotron-3-super-120b-a12b/chat [duration_ms=9146.519411]
+2026-09-11 17:58:13 | INFO | Tool executed: file_read [duration_ms=0.558562]
+2026-09-11 17:58:15 | INFO | [llm] ход: tool_calls=1 content_len=0 head=""
+2026-09-11 17:58:15 | INFO | LLM request: custom/nvidia/nemotron-3-super-120b-a12b/chat [duration_ms=2418.359293]
+2026-09-11 17:58:15 | ERROR | Tool failed: doc_generator [duration_ms=0.065968, error=⚙️ Ошибка выполнения
+doc_generator: нужен либо 'file_path', либо 'directory']
+2026-09-11 17:58:21 | INFO | [llm] ход: tool_calls=1 content_len=0 head=""
+2026-09-11 17:58:21 | INFO | LLM request: custom/nvidia/nemotron-3-super-120b-a12b/chat [duration_ms=5938.970333]
+2026-09-11 17:58:21 | INFO | Tool executed: doc_generator [duration_ms=1.019362]
+2026-09-11 17:58:40 | INFO | [llm] ход: tool_calls=1 content_len=0 head=""
+2026-09-11 17:58:40 | INFO | LLM request: custom/nvidia/nemotron-3-super-120b-a12b/chat [duration_ms=18739.231970999997]
+2026-09-11 17:58:40 | INFO | Tool executed: vector_add [duration_ms=0.187722]
+2026-09-11 17:58:48 | INFO | [llm] ход: tool_calls=1 content_len=0 head=""
+2026-09-11 17:58:48 | INFO | LLM request: custom/nvidia/nemotron-3-super-120b-a12b/chat [duration_ms=8654.163142]
+2026-09-11 17:58:48 | INFO | Tool executed: bash [duration_ms=11.12775]
+2026-09-11 17:59:40 | INFO | [llm] ход: tool_calls=0 content_len=8048 head="We need to count the number of doc comments extracted from the file by the doc_generator tool.\n The output of doc_generator for src/tools/db_universal.rs shows "
+2026-09-11 17:59:40 | INFO | LLM request: custom/nvidia/nemotron-3-super-120b-a12b/chat [duration_ms=51752.523048999996]
+2026-09-11 18:00:10 | INFO | [llm] ход: tool_calls=1 content_len=0 head=""
+2026-09-11 18:00:10 | INFO | LLM request: custom/nvidia/nemotron-3-super-120b-a12b/chat [duration_ms=16323.706741999998]
+2026-09-11 18:00:10 | INFO | Tool executed: vector_search [duration_ms=0.029076]
+2026-09-11 18:00:11 | ERROR | LLM error: custom/nvidia/nemotron-3-super-120b-a12b/chat [error=API error: HTTP 500 Internal Server Error: Internal server error]
+2026-09-11 18:00:12 | ERROR | LLM error: custom/nvidia/nemotron-3-super-120b-a12b/chat [error=API error: HTTP 500 Internal Server Error: Internal server error]
+2026-09-11 18:01:09 | WARNING | [llm] пустой ответ — одна попытка повторить (empty-response guard)
+2026-09-11 18:01:45 | INFO | [llm] ход: tool_calls=1 content_len=0 head=""
+2026-09-11 18:01:45 | INFO | LLM request: custom/nvidia/nemotron-3-super-120b-a12b/chat [duration_ms=92044.428649]
+2026-09-11 18:01:45 | INFO | Tool executed: bash [duration_ms=32.315251]
+2026-09-11 18:02:03 | INFO | [llm] ход: tool_calls=0 content_len=8048 head="We need to count the number of doc comments extracted from the file by the doc_generator tool.\n The output of doc_generator for src/tools/db_universal.rs shows "
+2026-09-11 18:02:03 | INFO | LLM request: custom/nvidia/nemotron-3-super-120b-a12b/chat [duration_ms=18664.621285999998]
+2026-09-11 18:02:18 | ERROR | LLM error: custom/nvidia/nemotron-3-super-120b-a12b/chat [error=API error: HTTP 500 Internal Server Error: Internal server error]
+2026-09-11 18:02:19 | ERROR | LLM error: custom/nvidia/nemotron-3-super-120b-a12b/chat [error=API error: HTTP 500 Internal Server Error: Internal server error]
+2026-09-11 18:02:41 | INFO | [llm] ход: tool_calls=0 content_len=8048 head="We need to count the number of doc comments extracted from the file by the doc_generator tool.\n The output of doc_generator for src/tools/db_universal.rs shows "
+2026-09-11 18:02:41 | INFO | LLM request: custom/nvidia/nemotron-3-super-120b-a12b/chat [duration_ms=20830.139756]
+2026-09-11 18:03:19 | INFO | [llm] ход: tool_calls=1 content_len=0 head=""
+2026-09-11 18:03:19 | INFO | LLM request: custom/nvidia/nemotron-3-super-120b-a12b/chat [duration_ms=24577.471837]
+2026-09-11 18:03:19 | INFO | Tool executed: bash [duration_ms=23.177514]
+2026-09-11 18:03:40 | INFO | [llm] ход: tool_calls=0 content_len=8048 head="We need to count the number of doc comments extracted from the file by the doc_generator tool.\n The output of doc_generator for src/tools/db_universal.rs shows "
+2026-09-11 18:03:40 | INFO | LLM request: custom/nvidia/nemotron-3-super-120b-a12b/chat [duration_ms=21822.18987]

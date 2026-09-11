@@ -80,7 +80,7 @@ pub struct AgentConfig {
     ///
     /// Поверх встроенных дефолтов (защита .env/ключей → ask).
     #[serde(default)]
-    pub permissions: Vec<crate::permissions::RuleConfig>,
+    pub permissions: PermissionSettings,
     /// УНИВЕРСАЛЬНЫЕ БД (db_universal.rs): подключения для db_query
     /// (sqlite/postgres/mysql через sqlx) и db_redis. Секреты — через
     /// {env:VAR} в url, не в конфиге:
@@ -91,6 +91,15 @@ pub struct AgentConfig {
     ///   description = "прод, только чтение"
     #[serde(default)]
     pub databases: HashMap<String, crate::tools::db_universal::DatabaseConfig>,
+}
+
+/// Обёртка секции [permissions] в config.toml: [[permissions.rules]] —
+/// массив правил. Отдельный тип нужен, потому что TOML `[[permissions.rules]]`
+/// это таблица permissions с полем-массивом rules (не плоский массив).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PermissionSettings {
+    #[serde(default)]
+    pub rules: Vec<crate::permissions::RuleConfig>,
 }
 
 /// Один сохранённый профиль подключения — тот же набор полей, что и
@@ -134,7 +143,7 @@ impl Default for AgentConfig {
             profiles: HashMap::new(),
             work_dir: None,
             small_model: None,
-            permissions: Vec::new(),
+            permissions: Default::default(),
             databases: HashMap::new(),
         }
     }

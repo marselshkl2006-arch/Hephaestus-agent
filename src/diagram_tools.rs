@@ -50,11 +50,14 @@ fn extract_classes(content: &str, _lang: &str) -> Vec<HashMap<String, Value>> {
     
     // Простой regex-based парсинг для всех языков
     // Для полноценной поддержки нужно tree-sitter, но для базовых случаев хватит regex
-    let re_class = Regex::new(r#"(?m)^\s*(?:class|struct|interface|trait|type|enum|object|case class)\s+(\w+)(?:\s*(?:extends|implements|:|<|\{|where)\s*([^{]+))?"#).unwrap();
+    // ФИКС (живой e2e): Rust-структуры почти всегда `pub struct`/`pub enum`/
+    // `pub trait` — без опционального pub-префикса regex не находил НИ ОДНОЙ
+    // структуры в типичных Rust-файлах.
+    let re_class = Regex::new(r#"(?m)^\s*(?:pub(\([^)]*\))?\s+)?(?:class|struct|interface|trait|type|enum|object|case class)\s+(\w+)(?:\s*(?:extends|implements|:|<|\{|where)\s*([^{]+))?"#).unwrap();
     
     for cap in re_class.captures_iter(content) {
-        let name = cap[1].to_string();
-        let bases = cap.get(2).map(|m| m.as_str().trim().to_string()).unwrap_or_default();
+        let name = cap[2].to_string();
+        let bases = cap.get(3).map(|m| m.as_str().trim().to_string()).unwrap_or_default();
         let mut class_info = HashMap::new();
         class_info.insert("name".to_string(), Value::String(name));
         class_info.insert("bases".to_string(), Value::String(bases));

@@ -1,0 +1,11 @@
+Задача A: todo_write создай план из 2 пунктов: "шаг один" (pending), "шаг два" (pending). Затем todo_read покажи план.
+Задача B: memory_file_save факт name: e2e-test, type: project, description: "память работает", content: "запись из e2e". Затем memory_file_list.
+Задача C: secret_set name=e2e_token value=abc123; затем secret_list; затем secret_get name=e2e_token.
+Задача D: git инструмент, команда "status --short" в рабочей директории. Если ошибка — скажи какую.
+Задача E: diagram kind=class_diagram path=src/state_db.rs — скажи, сколько модулей нашлось.
+Задача F: web_fetch url=https://example.com — назови заголовок страницы.
+Задача G: cache_set key=e2e value=hello ttl=60; затем cache_get key=e2e.
+Задача H: repomap_scan — скажи, сколько файлов отсканировано.
+Задача I: project_analyze path=. — коротко скажи, какие языки найдены.
+Задача J: notebook_create path=test/results/e2e.ipynb title=E2E. Затем notebook_read.
+exit

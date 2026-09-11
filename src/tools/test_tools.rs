@@ -53,6 +53,33 @@ impl Tool for RunTestsTool {
         };
         let dir_path = dir_path.canonicalize().unwrap_or(dir_path);
 
+        // MEMORY GUARD (после живого инцидента OOM): линковка cargo-тестов
+        // съедает гигабайты. Если доступной памяти мало (параллельные
+        // сборки!) — честный отказ с объяснением вместо убийства системы
+        // oom-killer'ом. Linux: /proc/meminfo; другие ОС — пропускаем
+        // проверку (нет простого стандартного API без зависимостей).
+        if detect_runner(&dir_path).map(|(r, _)| r.contains("cargo")).unwrap_or(false)
+            && cfg!(target_os = "linux")
+        {
+            if let Ok(meminfo) = std::fs::read_to_string("/proc/meminfo") {
+                let available_kb: Option<u64> = meminfo.lines().find_map(|l| {
+                    l.strip_prefix("MemAvailable:").and_then(|rest| {
+                        rest.split_whitespace().next().and_then(|n| n.parse().ok())
+                    })
+                });
+                const MIN_AVAILABLE_KB: u64 = 1_500_000; // 1.5 ГБ
+                if let Some(avail) = available_kb {
+                    if avail < MIN_AVAILABLE_KB {
+                        return ToolResult::error(format!(
+                            "⏸ Отказ: доступно только {:.1} ГБ памяти (нужно ≥1.5 ГБ на линковку тестов). \
+                             Параллельно идут другие сборки — подожди их завершения и повтори.",
+                            avail as f64 / 1_048_576.0
+                        ));
+                    }
+                }
+            }
+        }
+
         let (runner, base_args) = match args.get("runner").and_then(|v| v.as_str()) {
             Some(explicit) => (explicit, vec![]),
             None => match detect_runner(&dir_path) {

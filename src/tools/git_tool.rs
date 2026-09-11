@@ -162,7 +162,12 @@ impl Tool for GitTool {
             .and_then(|v| v.as_str())
             .unwrap_or("status");
 
-        match cmd {
+        // CLI-привычки моделей: "git status --short" приходит как command
+        // "status --short" — первый токен это action, хвост игнорируем
+        // (специфичные опции передаются отдельными полями схемы).
+        let action = cmd.split_whitespace().next().unwrap_or("status");
+
+        match action {
             "status" => self.status().await,
             "diff" => {
                 let staged = args.get("staged").and_then(|v| v.as_bool()).unwrap_or(false);

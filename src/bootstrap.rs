@@ -56,6 +56,7 @@ mod tests {
 
     #[test]
     fn unpacks_examples_into_isolated_home() {
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::TempDir::new().unwrap();
         std::env::set_var("HEPHAESTUS_HOME", tmp.path());
         std::fs::remove_dir_all(tmp.path()).ok();

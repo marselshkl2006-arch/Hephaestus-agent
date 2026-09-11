@@ -153,6 +153,8 @@ mod tests {
 
     #[test]
     fn long_output_offloaded_to_file() {
+        // Тест меняет процессный env — берём общий тестовый лок.
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Гарантируем изолированный каталог: HEPHAESTUS_HOME читается на
         // каждый вызов.
         let tmp = std::env::temp_dir().join(format!("hefest-toolout-test-{}", std::process::id()));

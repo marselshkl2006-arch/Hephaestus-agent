@@ -64,6 +64,8 @@ mod learning;
  mod interrupt;
  mod bootstrap;
 #[cfg(test)]
+mod tools_live_tests;
+#[cfg(test)]
 mod integration_tests;
 
 // НЕ подключены сознательно (пересмотрено в итерации 7 — caching.rs,
@@ -189,6 +191,11 @@ pub fn mark_clean_shutdown(state: &state_db::StateDb, session_id: i64) {
 pub(crate) fn estimate_tokens(text: &str) -> u64 {
     (text.chars().count() as u64 / 3).max(1)
 }
+
+/// Общий лок для тестов, меняющих процессный env (HEPHAESTUS_HOME):
+/// параллельные тесты с set_var/remove_var гоняют друг друга — флейки.
+#[cfg(test)]
+pub static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Безопасная обрезка строки по СИМВОЛАМ UTF-8, а не по байтам.
 /// Срез `&s[..n]` паникует ("byte index N is not a char boundary"), если n
@@ -1433,7 +1440,7 @@ async fn main() {
         config,
         true,
         workdir,
-        agent_config.permissions.clone(),
+        agent_config.permissions.rules.clone(),
         Some(tools::db_universal::DbConnections::new(agent_config.databases.clone())),
     );
     // SMALL MODEL (config.toml: small_model = "...") — служебные вызовы
