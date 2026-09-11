@@ -141,6 +141,12 @@ impl Default for AgentConfig {
 }
 
 fn config_path() -> PathBuf {
+    // HEPHAESTUS_HOME — единый механизм (bootstrap/state_db/mcp/telegram).
+    if let Ok(custom) = std::env::var("HEPHAESTUS_HOME") {
+        let p = PathBuf::from(custom);
+        let _ = std::fs::create_dir_all(&p);
+        return p.join("config.toml");
+    }
     let mut p = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     p.push(".hephaestus");
     let _ = std::fs::create_dir_all(&p);
@@ -319,5 +325,35 @@ impl AgentConfig {
             extra_headers: self.extra_headers.clone(),
             extra_body: self.extra_body.clone(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// [databases.NAME] из config.toml разворачивается в HashMap
+    /// (db_universal.rs получает подключения из этого поля).
+    #[test]
+    fn databases_section_parses() {
+        let raw = r#"
+provider = "ollama"
+model = "m"
+
+[databases.prod]
+url = "postgres://app:{env:PG_PASSWORD}@10.0.0.5/appdb"
+read_only = true
+description = "прод"
+
+[databases.cache]
+url = "redis://127.0.0.1:6379/0"
+"#;
+        let cfg: AgentConfig = toml::from_str(raw).unwrap();
+        assert_eq!(cfg.databases.len(), 2);
+        let prod = cfg.databases.get("prod").unwrap();
+        assert!(prod.read_only, "read_only default-true через serde default");
+        assert_eq!(prod.description, "прод");
+        let cache = cfg.databases.get("cache").unwrap();
+        assert!(cache.read_only, "пропущенное поле = дефолт (true)");
     }
 }

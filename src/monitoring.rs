@@ -65,8 +65,12 @@ pub struct MetricsCollector {
 
 impl MetricsCollector {
     pub fn new() -> Self {
-        let mut dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        dir.push(".hephaestus");
+        // HEPHAESTUS_HOME — как во всех модулях.
+        let mut dir = if let Ok(custom) = std::env::var("HEPHAESTUS_HOME") {
+            PathBuf::from(custom)
+        } else {
+            dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".hephaestus")
+        };
         dir.push("metrics");
         let _ = std::fs::create_dir_all(&dir);
         Self {

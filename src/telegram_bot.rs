@@ -35,6 +35,10 @@ const API_BASE: &str = "https://api.telegram.org/bot";
 static BOT_POLLING: AtomicBool = AtomicBool::new(false);
 
 fn token_file_path() -> PathBuf {
+    // HEPHAESTUS_HOME — как во всех модулях (bootstrap/state_db/mcp).
+    if let Ok(custom) = std::env::var("HEPHAESTUS_HOME") {
+        return PathBuf::from(custom).join("telegram_token.txt");
+    }
     let mut p = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     p.push(".hephaestus");
     p.push("telegram_token.txt");
@@ -515,6 +519,15 @@ pub async fn run_from_env(agent: Agent) {
 
     let agent = Arc::new(Mutex::new(agent));
     Agent::spawn_queue_worker(&agent).await;
-    let bot = TelegramBot::new(token, agent, allowed_chat_id);
+    let bot = TelegramBot::new(token, agent.clone(), allowed_chat_id);
     bot.run().await;
+    // Штатный выход (--telegram): иначе следующий запуск считает крашем
+    // и продолжит «аварийную» сессию.
+    let clean = {
+        let mut a = agent.lock().await;
+        let sid = a.session_id();
+        crate::mark_clean_shutdown(&a.state, sid);
+        true
+    };
+    let _ = clean;
 }

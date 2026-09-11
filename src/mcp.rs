@@ -94,6 +94,11 @@ impl McpServerConfig {
 }
 
 fn mcp_config_path() -> std::path::PathBuf {
+    // HEPHAESTUS_HOME уважается везде (bootstrap, state_db, tool_output):
+    // изолированные тесты и несколько агентов на машине без сюрпризов.
+    if let Ok(custom) = std::env::var("HEPHAESTUS_HOME") {
+        return std::path::PathBuf::from(custom).join("mcp.toml");
+    }
     let mut p = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
     p.push(".hephaestus");
     p.push("mcp.toml");

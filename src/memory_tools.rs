@@ -26,6 +26,10 @@ pub struct MemorySystem {
 impl MemorySystem {
     pub fn new(storage_path: Option<PathBuf>) -> Self {
         let path = storage_path.unwrap_or_else(|| {
+            // HEPHAESTUS_HOME — как во всех модулях.
+            if let Ok(custom) = std::env::var("HEPHAESTUS_HOME") {
+                return PathBuf::from(custom).join("memory.json");
+            }
             let mut home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
             home.push(".hephaestus");
             home.push("memory.json");

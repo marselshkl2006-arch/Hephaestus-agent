@@ -56,7 +56,11 @@ pub struct LoggerConfig {
 
 impl Default for LoggerConfig {
     fn default() -> Self {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        // HEPHAESTUS_HOME — как во всех модулях (иначе логи писались в
+        // реальный ~/.hephaestus даже при изолированном HEPHAESTUS_HOME).
+        let home = std::env::var("HEPHAESTUS_HOME")
+            .or_else(|_| std::env::var("HOME"))
+            .unwrap_or_else(|_| ".".to_string());
         Self {
             log_dir: PathBuf::from(home).join(".hephaestus").join("logs"),
             max_file_size: 10 * 1024 * 1024, // 10MB

@@ -135,6 +135,12 @@ fn recover_session(
     // Три аварийных старта подряд → контент сессии подозрителен → новый лист.
     let force_fresh = crashed && streak >= 3;
 
+    // ПУСТАЯ прошлая сессия переиспользуется при ЛЮБОМ сценарии: иначе
+    // каждый перезапуск (даже штатный) плодил бы пустую сессию в /sessions.
+    if state.count_messages(last_id) == 0 {
+        return (state_db::SessionHandle::new(state.clone(), last_id), None);
+    }
+
     if !crashed || force_fresh {
         if force_fresh {
             // Эскалация сработала — счётчик обнулён: следующему крашу нужно
@@ -1542,9 +1548,9 @@ async fn main() {
         // WATCHDOG: в voice-режиме нет тика TUI — живость доказывает
         // runtime-тикер (простой пользователя на read_line — норма).
         watchdog::spawn_runtime_ticker();
-        let agent = std::sync::Arc::new(tokio::sync::Mutex::new(agent));
+        let agent_arc = std::sync::Arc::new(tokio::sync::Mutex::new(agent));
         let voice = voice_interface::create_voice_interface(
-            agent,
+            agent_arc.clone(),
             None, // модель whisper по умолчанию ("small")
             None, // язык по умолчанию ("ru")
             None, // piper не настроен — используется espeak(-ng), если есть
@@ -1552,6 +1558,10 @@ async fn main() {
             false,
         );
         voice.run_loop().await;
+        // Штатный выход (--voice).
+        if let Ok(a) = agent_arc.try_lock() {
+            mark_clean_shutdown(&a.state, a.session_id());
+        }
         return;
     }
 
@@ -1602,4 +1612,7 @@ async fn run_simple_loop(mut agent: Agent) {
             .await;
         println!("\n");
     }
+    // ШТАТНЫЙ ВЫХОД (--simple тоже чистый выход): иначе следующий запуск
+    // считал процесс крашнутым и продолжал «аварийную» сессию.
+    mark_clean_shutdown(&agent.state, agent.session_id());
 }
