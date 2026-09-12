@@ -15,3 +15,13 @@ max_tokens = 2048
 tool = "bash"
 pattern = "echo *"
 action = "allow"
+
+[databases.pg-e2e]
+url = "postgres://e2e:e2epass@127.0.0.1:55432/e2e"
+read_only = false
+description = "живой postgres e2e"
+
+[[permissions.rules]]
+tool = "db_write"
+pattern = "pg-e2e"
+action = "allow"

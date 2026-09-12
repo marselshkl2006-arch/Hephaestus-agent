@@ -1,1 +1,1 @@
-before turn: exit
+before turn: Через db_query в базу pg-e2e выполни: CREATE TABLE IF NOT EX

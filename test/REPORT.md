@@ -129,3 +129,14 @@ permissions-as-data (audit trail), recovery, сессии, MCP, git, web, кэш
 5. **Аудит разрешений** теперь пишется во ВСЕХ ask-ветках: bash (правило
    + риск), db_write, файловые ask/delete — granted/denied в permission_log.
 6. pty_driver.py: поддержка доп. аргументов (5-й+) для --voice/--simple.
+
+## Реальное время: PostgreSQL (финал живой серии)
+
+- Контейнер `hefest-e2e-pg` (postgres:16-alpine, 127.0.0.1:55432, e2e/e2epass).
+- Живой ход через `--simple "..."`: db_query → CREATE TABLE / INSERT / SELECT.
+- Верификация НЕ агентом, а снаружи: `psql -c "SELECT * FROM greet"` →
+  «привет из Гефеста». Три db_query tool-calls completed в state.db,
+  разрешение db_write — через [[permissions.rules]] (audit: rule:pg-e2e).
+- ПОЙМАН БАГ: `--simple "запрос"` молча игнорировал аргумент (интерактивный
+  цикл ждал stdin) — добавлен честный one-shot режим; штанный выход
+  помечает clean_shutdown.

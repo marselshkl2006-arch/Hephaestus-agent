@@ -8,3 +8,27 @@
 2026-09-12 10:59:47 | INFO | LLM request: custom/nvidia/nemotron-3-super-120b-a12b/chat [duration_ms=4360.646818]
 2026-09-12 11:01:23 | INFO | [telegram] подключён как @gefeest_agent_bot
 2026-09-12 11:01:30 | INFO | [queue] ход из 'tui', в очереди осталось 0
+2026-09-12 11:28:45 | INFO | [llm] ход: tool_calls=1 content_len=0 head=""
+2026-09-12 11:28:45 | INFO | LLM request: custom/nvidia/nemotron-3-super-120b-a12b/chat [duration_ms=9163.152238]
+2026-09-12 11:28:45 | INFO | [permission] tool=db_write action=denied key="pg-e2e" source=ask-interactive
+2026-09-12 11:28:45 | ERROR | Tool failed: db_query [duration_ms=0.119259, error=⚙️ Ошибка выполнения
+🚫 Пользователь ОТКЛОНИЛ запись в базу.]
+2026-09-12 11:28:50 | INFO | [llm] ход: tool_calls=1 content_len=0 head=""
+2026-09-12 11:28:50 | INFO | LLM request: custom/nvidia/nemotron-3-super-120b-a12b/chat [duration_ms=4814.324060999999]
+2026-09-12 11:28:50 | ERROR | Tool failed: db_query [duration_ms=9.43019, error=🔍 Не найдено
+sql: error returned from database: relation "greet" does not exist]
+2026-09-12 11:29:31 | INFO | [llm] ход: tool_calls=0 content_len=633 head="Я попытался выполнить ваш запрос через `db_query` в базе `pg-e2e`:\n\n1. `CREATE TABLE IF NOT EXISTS greet (id serial, txt text);` — запрос был **отклонён пользов"
+2026-09-12 11:29:31 | INFO | LLM request: custom/nvidia/nemotron-3-super-120b-a12b/chat [duration_ms=41455.282511]
+2026-09-12 11:29:54 | INFO | [llm] ход: tool_calls=1 content_len=0 head=""
+2026-09-12 11:29:54 | INFO | LLM request: custom/nvidia/nemotron-3-super-120b-a12b/chat [duration_ms=11810.170086]
+2026-09-12 11:29:54 | INFO | [permission] tool=db_write action=allow key="pg-e2e" source=rule:pg-e2e
+2026-09-12 11:29:54 | INFO | Tool executed: db_query [duration_ms=22.520516]
+2026-09-12 11:30:01 | INFO | [llm] ход: tool_calls=1 content_len=0 head=""
+2026-09-12 11:30:01 | INFO | LLM request: custom/nvidia/nemotron-3-super-120b-a12b/chat [duration_ms=6951.820401]
+2026-09-12 11:30:01 | INFO | [permission] tool=db_write action=allow key="pg-e2e" source=rule:pg-e2e
+2026-09-12 11:30:01 | INFO | Tool executed: db_query [duration_ms=14.203046]
+2026-09-12 11:30:12 | INFO | [llm] ход: tool_calls=1 content_len=0 head=""
+2026-09-12 11:30:12 | INFO | LLM request: custom/nvidia/nemotron-3-super-120b-a12b/chat [duration_ms=10514.894115000001]
+2026-09-12 11:30:12 | INFO | Tool executed: db_query [duration_ms=5.853921]
+2026-09-12 11:30:20 | INFO | [llm] ход: tool_calls=0 content_len=195 head="Таблица `greet` создана (если не существовала), в неё добавлена строка с текстом «привет из Гефеста». Выборка вернула эту строку.\n\nРезультат SELECT:\n```\ntxt\n---"
+2026-09-12 11:30:20 | INFO | LLM request: custom/nvidia/nemotron-3-super-120b-a12b/chat [duration_ms=7839.6563639999995]

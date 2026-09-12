@@ -1,0 +1,52 @@
+{
+  "successes": [
+    {
+      "tool": "db_query",
+      "params_keys": [
+        "sql",
+        "connection"
+      ],
+      "context": "custom/nvidia/nemotron-3-super-120b-a12b",
+      "ts": "2026-09-12T05:29:54"
+    },
+    {
+      "tool": "db_query",
+      "params_keys": [
+        "sql",
+        "connection"
+      ],
+      "context": "custom/nvidia/nemotron-3-super-120b-a12b",
+      "ts": "2026-09-12T05:30:01"
+    },
+    {
+      "tool": "db_query",
+      "params_keys": [
+        "sql",
+        "connection"
+      ],
+      "context": "custom/nvidia/nemotron-3-super-120b-a12b",
+      "ts": "2026-09-12T05:30:12"
+    }
+  ],
+  "failures": [
+    {
+      "tool": "db_query",
+      "error": "⚙️ Ошибка выполнения\n🚫 Пользователь ОТКЛОНИЛ запись в базу.",
+      "params_keys": [
+        "connection",
+        "sql"
+      ],
+      "ts": "2026-09-12T05:28:45"
+    },
+    {
+      "tool": "db_query",
+      "error": "🔍 Не найдено\nsql: error returned from database: relation \"greet\" does not exist",
+      "params_keys": [
+        "connection",
+        "sql"
+      ],
+      "ts": "2026-09-12T05:28:50"
+    }
+  ],
+  "preferences": {}
+}

@@ -1588,6 +1588,20 @@ async fn main() {
 
     if args.iter().any(|a| a == "--simple") {
         watchdog::spawn_runtime_ticker();
+        // One-shot: `--simple "запрос"` — выполнить ОДИН ход и выйти
+        // (раньше аргумент молча игнорировался и цикл ждал stdin —
+        // ловился живым прогоном db_query по postgres).
+        if let Some(idx) = args.iter().position(|a| a == "--simple") {
+            if let Some(prompt) = args.get(idx + 1) {
+                if !prompt.starts_with("--") && prompt != "exit" {
+                    let mut a = agent;
+                    let reply = a.chat(prompt, 25, false).await;
+                    println!("{reply}");
+                    mark_clean_shutdown(&a.state, a.session_id());
+                    return;
+                }
+            }
+        }
         run_simple_loop(agent).await;
         return;
     }
