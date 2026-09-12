@@ -1,0 +1,56 @@
+[package]
+name = "hephaestus-rs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.0", features = ["full"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+walkdir = "2"
+glob = "0.3"
+regex = "1"
+moka = { version = "0.12", features = ["sync"] }
+dirs = "5.0"
+async-trait = "0.1"
+# ИСПРАВЛЕНО (сборка пользователя, см. CHANGES_SUMMARY.md): без фичи
+# "serde" DateTime<Utc> в memory_tools.rs не реализует Serialize/Deserialize.
+chrono = { version = "0.4", features = ["serde"] }
+# config.rs — ~/.hephaestus/config.toml (провайдер/модель, /provider и /model в REPL).
+toml = "0.8"
+
+# Голосовой интерфейс — чистый Rust, без Python и без whisper.cpp
+cpal = "0.15"
+hound = "3.5"
+tempfile = "3"
+rodio = "0.20"
+futures-util = "0.3"
+# rwhisper: чистый Rust STT на candle (https://docs.rs/rwhisper)
+rwhisper = "0.4"
+
+# REPL (TUI)
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+
+# Базы данных
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# Универсальный db_* (db_universal.rs): ЕДИНЫЙ API для SQLite+PostgreSQL+MySQL
+# через sqlx (чистый Rust, TLS — rustls, без системных libpq) + Redis.
+# MongoDB — намеренно НЕ встроен (документная модель — другой API, тяжёлый
+# крейт): подключается MCP-сервером (~/.hephaestus/mcp.toml) или скиллом.
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio-rustls", "any", "sqlite", "postgres", "mysql", "json",
+] }
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager", "json"] }
+
+# Генерация DOCX/ODT/XLSX — это просто ZIP с XML внутри
+zip = "2"
+
+[profile.release]
+strip = true
+opt-level = 3
+lto = true
+codegen-units = 1

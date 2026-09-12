@@ -1,0 +1,4 @@
+WAIT 8
+TYPE /sessions
+WAIT 6
+TYPE /exit

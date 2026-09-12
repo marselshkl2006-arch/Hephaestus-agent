@@ -1,0 +1,15 @@
+--- main.rs: добавить моды ---
+mod error_handler;
+mod progress_display;
+
+--- tools/mod.rs: добавить объявления модулей ---
+pub mod doc_generator;
+pub mod advanced_tools;
+
+--- tools/mod.rs: добавить в create_tools() (после worktree) ---
+registry.register("doc_generator", Arc::new(doc_generator::DocGeneratorTool::new()));
+registry.register("package_install", Arc::new(advanced_tools::PackageInstallTool::new()));
+registry.register("http_request", Arc::new(advanced_tools::HttpRequestTool::new()));
+
+// Бонус: project_tools.rs уже был написан, но нигде не регистрировался
+registry.register("project_analyze", Arc::new(crate::project_tools::ProjectAnalyzerTool::new(workspace_root)));

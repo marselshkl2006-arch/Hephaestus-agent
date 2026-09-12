@@ -1,0 +1,13 @@
+/target
+
+
+# Added by cargo
+#
+# already existing elements were commented out
+
+#/target
+
+# Живые прогоны: изолированные дома, артефакты pty, результаты — не для репо
+test/live-*
+test/results/
+test/pts/
