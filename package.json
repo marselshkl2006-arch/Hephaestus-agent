@@ -25,8 +25,7 @@
     "tui"
   ],
   "files": [
-    "npm/bin",
-    "npm/postinstall.mjs",
+    "npm",
     "README.md"
   ],
   "main": "npm/bin/hephaestus.js"
