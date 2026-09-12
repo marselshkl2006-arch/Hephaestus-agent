@@ -26,8 +26,9 @@ pub struct SessionManager {
 
 impl SessionManager {
     pub fn new() -> Self {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        let dir = PathBuf::from(home).join(".hephaestus").join("sessions");
+        // ФИКС: раньше только $HOME/.hephaestus — кастомный HEPHAESTUS_HOME
+        // игнорировался (сессии уезжали в реальный home даже при изолированном).
+        let dir = crate::bootstrap::hephaestus_home().join("sessions");
         let _ = fs::create_dir_all(&dir);
         Self { dir }
     }

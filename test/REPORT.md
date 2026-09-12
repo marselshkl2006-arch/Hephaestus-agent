@@ -111,3 +111,21 @@ permissions-as-data (audit trail), recovery, сессии, MCP, git, web, кэш
 - nvidia API:интермиттентный (флапающий) HTTP 451 (geo-флап) — агент переживает, ошибки отображаются.
 - ollama: num_ctx 4096 мало для системного промпта → HTTP 400 (задокументировано).
 - state.db: 12 таблиц, инкрементальная запись user/tool/assistant подтверждена.
+
+## Реальное время: recovery, Telegram, Voice, пути (финал серии)
+
+1. **Recovery через SIGKILL** (tui-crash1 + tui-recovery): kill -9 посреди
+   хода эссе → clean_shutdown=0 → рестарт показывает «Прошлый процесс не
+   завершился штатно: продолжаю сессию #N (1 сообщений)» + «Восстановлена
+   сессия #N» + оборванный ход виден в истории. Штатный /exit → clean_shutdown=1.
+2. **Telegram**: --telegram — long-poll getUpdates жив (первый WARNING был
+   разовым сетевым флапом; 60с молчаливого полла = норма). Бот подключён.
+3. **Voice**: --voice под pty — Whisper small реально загружена (CPU),
+   «Нажмите Enter, чтобы начать запись», graceful без микрофона, штатный
+   exit с mark_clean_shutdown.
+4. **Пути**: двойное вложение логов/learning устранено (bootstrap::формула);
+   session.rs игнорировал HEPHAESTUS_HOME — исправлен; tool-output через
+   bootstrap. Проверено: изолированный home = только metrics/logs внутри.
+5. **Аудит разрешений** теперь пишется во ВСЕХ ask-ветках: bash (правило
+   + риск), db_write, файловые ask/delete — granted/denied в permission_log.
+6. pty_driver.py: поддержка доп. аргументов (5-й+) для --voice/--simple.

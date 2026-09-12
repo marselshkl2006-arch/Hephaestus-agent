@@ -1,0 +1,10 @@
+⚡ Гефест — голосовой интерфейс (чистый Rust, rwhisper)
+⏳ Загружаю модель Whisper (small) — при первом запуске модель скачивается...
+✅ Модель Whisper загружена
+Running on CPU, to run on GPU, build with the cuda feature enabled. If you don't have access to an accelerator make sure you are running in release mode with `--release`. Models will run extremely slowly in debug mode on the CPU
+️  Нажмите Enter, чтобы начать запись...
+   (запись длится 3 секунды)
+
+Нажми Enter, чтобы говорить...
+exit
+ Выход.

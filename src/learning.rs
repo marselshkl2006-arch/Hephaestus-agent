@@ -43,11 +43,10 @@ pub struct ContextLearning {
 
 impl ContextLearning {
     pub fn new() -> Self {
-        // HEPHAESTUS_HOME — как во всех модулях.
-        let home = std::env::var("HEPHAESTUS_HOME")
-            .or_else(|_| std::env::var("HOME"))
-            .unwrap_or_else(|_| ".".to_string());
-        let file_path = PathBuf::from(home).join(".hephaestus").join("learning.json");
+        // HEPHAESTUS_HOME — как во всех модулях. ФИКС: HEPHAESTUS_HOME уже
+        // ".hephaestus"-каталог — старый join(".hephaestus") поверх давал
+        // двойное вложение (живой pty-прогон).
+        let file_path = crate::bootstrap::hephaestus_home().join("learning.json");
         let _ = fs::create_dir_all(file_path.parent().unwrap());
         let data = Self::load_data(&file_path);
         Self { file_path, data }

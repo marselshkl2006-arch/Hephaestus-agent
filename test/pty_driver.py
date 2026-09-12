@@ -11,6 +11,7 @@ BIN = sys.argv[1]
 HOME = sys.argv[2]
 SCENARIO = sys.argv[3]  # путь к файлу сценария: строки "WAIT 30" / "TYPE текст" / "KEY \\r" / "EXPECT Маркер" — только WAIT/TYPE/KEY
 OUT = sys.argv[4]
+EXTRA = sys.argv[5:]    # доп. аргументы бинарнику: --voice, --simple и т.п.
 
 os.environ["HEPHAESTUS_HOME"] = HOME
 os.environ["NVIDIA_API_KEY"] = open(os.path.expanduser("~/Nvidia_api.txt")).read().strip()
@@ -25,7 +26,7 @@ if pid == 0:
     fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
     os.dup2(slave, 0); os.dup2(slave, 1); os.dup2(slave, 2)
     os.close(master); os.close(slave)
-    os.execv(BIN, [BIN])
+    os.execv(BIN, [BIN] + EXTRA)
     os._exit(1)
 
 os.close(slave)

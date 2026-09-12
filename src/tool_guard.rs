@@ -69,15 +69,12 @@ impl DoomLoopDetector {
     }
 }
 
-/// Каталог для выгрузки больших выводов.
+/// Каталог для выгрузки больших выводов. Единая точка: всегда
+/// $HEPHAESTUS_HOME/tool-output через bootstrap (абсолютный путь,
+/// как state.db и логи) — иначе при отсутствии env уезжал в реальный
+/// ~/.hephaestus даже при изолированном home.
 pub fn tool_output_dir() -> std::path::PathBuf {
-    if let Ok(custom) = std::env::var("HEPHAESTUS_HOME") {
-        return std::path::PathBuf::from(custom).join("tool-output");
-    }
-    dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".hephaestus")
-        .join("tool-output")
+    crate::bootstrap::hephaestus_home().join("tool-output")
 }
 
 /// Безопасное имя файла из call_id (call_xxx от провайдеров — ASCII, но

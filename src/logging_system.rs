@@ -58,11 +58,13 @@ impl Default for LoggerConfig {
     fn default() -> Self {
         // HEPHAESTUS_HOME — как во всех модулях (иначе логи писались в
         // реальный ~/.hephaestus даже при изолированном HEPHAESTUS_HOME).
-        let home = std::env::var("HEPHAESTUS_HOME")
-            .or_else(|_| std::env::var("HOME"))
-            .unwrap_or_else(|_| ".".to_string());
+        // ФИКС (живой pty-прогон): HEPHAESTUS_HOME УЖЕ является каталогом
+        // ".hephaestus" — старый join(".hephaestus") поверх давал двойное
+        // вложение $HEPHAESTUS_HOME/.hephaestus/logs. bootstrap::формула
+        // единообразна и абсолютизирует путь.
+        let home = crate::bootstrap::hephaestus_home();
         Self {
-            log_dir: PathBuf::from(home).join(".hephaestus").join("logs"),
+            log_dir: home.join("logs"),
             max_file_size: 10 * 1024 * 1024, // 10MB
             backup_count: 5,
             console_level: LogLevel::Warning,
