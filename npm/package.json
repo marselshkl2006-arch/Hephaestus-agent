@@ -7,7 +7,9 @@
   "bin": {
     "hephaestus": "bin/hephaestus.js"
   },
-  "scripts": {},
+  "scripts": {
+    "postinstall": "node postinstall.mjs"
+  },
   "engines": {
     "node": ">=16"
   },
@@ -21,11 +23,5 @@
     "coding",
     "assistant",
     "tui"
-  ],
-  "files": [
-    "bin",
-    "postinstall.mjs",
-    "README.md"
-  ],
-  "main": "bin/hephaestus.js"
+  ]
 }
