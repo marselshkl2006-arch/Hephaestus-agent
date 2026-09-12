@@ -1,1 +1,0 @@
-before turn: Через db_redis на подключении redis-e2e выполни: SET greetin

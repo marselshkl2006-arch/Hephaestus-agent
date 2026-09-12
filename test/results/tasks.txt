@@ -1,7 +1,0 @@
-Задача 1: создай файл test/results/task1.txt с помощью file_write, содержимое ровно: E2E-OK. Затем прочитай его через file_read и скажи, что увидел.
-Задача 2: замени в файле test/results/task1.txt слово E2E-OK на E2E-EDITED через file_edit.
-Задача 3: найди инструментом grep слово E2E-EDITED в каталоге test/results и скажи, в каком файле и на какой строке.
-Задача 4: через bash создай файл test/results/bash_out.txt командой echo (содержимое BASH-RUN) и проверь file_exists.
-Задача 5: через db_query на подключении e2e выполни: CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT); затем INSERT INTO kv VALUES ('alpha','one'); затем SELECT * FROM kv.
-Задача 6: через document_create сделай файл test/results/report.pptx (format pptx) с заголовком "Тест Гефеста" и одним слайдом "## Проверка" с пунктом "- всё работает".
-exit

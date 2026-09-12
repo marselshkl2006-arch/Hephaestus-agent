@@ -1,3 +1,0 @@
-0000000000000000000000000000000000000000 8d4095d486aa109d43dbd8c7f01986b0368a24ff Hephaestus Snapshot <snapshot@hephaestus.local> 1789189183 +0600	commit (initial): before turn: Привет
-8d4095d486aa109d43dbd8c7f01986b0368a24ff 0e4eb8e84c6ad16698f14ae5951a469fc525d2c8 Hephaestus Snapshot <snapshot@hephaestus.local> 1789189290 +0600	commit: before turn: exit
-0e4eb8e84c6ad16698f14ae5951a469fc525d2c8 77ba6546fddc73cc2013d80e72c33533eb38aa8c Hephaestus Snapshot <snapshot@hephaestus.local> 1789190916 +0600	commit: before turn: Через db_query в базу pg-e2e выполни: CREATE TABLE IF NOT EX

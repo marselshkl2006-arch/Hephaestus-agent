@@ -1,7 +1,0 @@
-⚡ Гефест — AI Coding Agent (Rust) [простой режим]
-Введите ваш запрос (или 'exit' для выхода):
-
-> 
-Найдены следующие структуры в `src/state_db.rs`: - `ToolCallRow` - `SessionSummary` - `StateDb` - `SessionHandle`
-
-> 

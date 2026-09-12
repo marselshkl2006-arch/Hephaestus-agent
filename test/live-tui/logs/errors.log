@@ -1,4 +1,0 @@
-2026-09-12 11:28:45 | ERROR | Tool failed: db_query [duration_ms=0.119259, error=⚙️ Ошибка выполнения
-🚫 Пользователь ОТКЛОНИЛ запись в базу.]
-2026-09-12 11:28:50 | ERROR | Tool failed: db_query [duration_ms=9.43019, error=🔍 Не найдено
-sql: error returned from database: relation "greet" does not exist]
