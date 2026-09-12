@@ -5,10 +5,10 @@
   "license": "MIT",
   "private": false,
   "bin": {
-    "hephaestus": "bin/hephaestus.js"
+    "hephaestus": "npm/bin/hephaestus.js"
   },
   "scripts": {
-    "postinstall": "node postinstall.mjs"
+    "postinstall": "node npm/postinstall.mjs"
   },
   "engines": {
     "node": ">=16"
@@ -23,5 +23,11 @@
     "coding",
     "assistant",
     "tui"
-  ]
+  ],
+  "files": [
+    "npm/bin",
+    "npm/postinstall.mjs",
+    "README.md"
+  ],
+  "main": "npm/bin/hephaestus.js"
 }
