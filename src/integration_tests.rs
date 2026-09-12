@@ -564,3 +564,64 @@ mod memory_staging_integration {
         }
     }
 }
+
+#[cfg(test)]
+mod llm_history_tests {
+    use crate::llm::*;
+
+    /// РЕГРЕССИЯ живого прогона (TokenRouter, HTTP 400 "tool message must
+    /// follow an assistant message"): осиротевший tool-результат (после
+    /// Esc/ретрая/recovery) не должен попадать в запрос как role:"tool".
+    #[test]
+    fn orphan_tool_result_is_sanitized() {
+        let cfg = LLMConfig {
+            provider: LLMProvider::Custom,
+            model: "m".into(),
+            base_url: Some("http://localhost:9".into()),
+            api_key: Some("k".into()),
+            temperature: 0.1,
+            max_tokens: 8,
+            stream: false,
+            extra_headers: Default::default(),
+            extra_body: None,
+        };
+        let client = OpenAICompatibleClient::new(cfg);
+        let msgs = vec![
+            LLMMessage::user("привет".to_string()),
+            // СИРОТА: tool без родительского assistant с tool_calls.
+            LLMMessage::tool_result("call_x".to_string(), "результат без родителя".to_string()),
+            LLMMessage::user("далее".to_string()),
+        ];
+        let out = client.build_messages_for_test(&msgs, None);
+        let roles: Vec<&str> = out.iter().map(|m| m["role"].as_str().unwrap()).collect();
+        assert!(!roles.contains(&"tool"), "сирота-Tool утечёл: {roles:?}");
+        assert!(roles.contains(&"user"), "сирота должен стать user: {roles:?}");
+        let orphan = out.iter().find(|m| m["role"] == "user" && m["content"].as_str().unwrap_or("").contains("без родителя"));
+        assert!(orphan.is_some(), "содержимое результата потеряно: {out:?}");
+    }
+
+    /// Здоровая цепочка assistant(tool_calls) → tool — остаётся валидной.
+    #[test]
+    fn normal_tool_chain_is_preserved() {
+        let cfg = LLMConfig {
+            provider: LLMProvider::Custom,
+            model: "m".into(),
+            base_url: Some("http://localhost:9".into()),
+            api_key: Some("k".into()),
+            temperature: 0.1,
+            max_tokens: 8,
+            stream: false,
+            extra_headers: Default::default(),
+            extra_body: None,
+        };
+        let client = OpenAICompatibleClient::new(cfg);
+        let calls = vec![ToolUseBlock { id: "call_1".into(), name: "file_read".into(), input: serde_json::json!({"file_path":"a"}) }];
+        let mut a = LLMMessage::assistant("смотрю".to_string());
+        a.tool_calls = Some(calls);
+        let msgs = vec![LLMMessage::user("прочитай a".to_string()), a, LLMMessage::tool_result("call_1".to_string(), "текст файла".to_string())];
+        let out = client.build_messages_for_test(&msgs, None);
+        let roles: Vec<&str> = out.iter().map(|m| m["role"].as_str().unwrap()).collect();
+        assert_eq!(roles, vec!["user", "assistant", "tool"], "цепочка сломана: {roles:?}");
+        assert_eq!(out[2]["tool_call_id"].as_str().unwrap(), "call_1");
+    }
+}

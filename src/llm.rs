@@ -617,6 +617,13 @@ impl OpenAICompatibleClient {
         Self { config, client: reqwest::Client::new() }
     }
 
+    /// Тестовый доступ к сборке истории (регресс-тест sanitizer-а
+    /// осиротевших tool-результатов — см. integration_tests).
+    #[cfg(test)]
+    pub fn build_messages_for_test(&self, messages: &[LLMMessage], system: Option<&str>) -> Vec<Value> {
+        self.build_messages(messages, system)
+    }
+
     fn endpoint(&self) -> String {
         let base = self
             .config
@@ -659,19 +666,34 @@ impl OpenAICompatibleClient {
     /// assistant-сообщений с tool_calls).
     fn build_messages(&self, messages: &[LLMMessage], system: Option<&str>) -> Vec<Value> {
         let mut out: Vec<Value> = Vec::new();
-        
+
         // Сначала добавляем системное сообщение из параметра (если есть)
         if let Some(system_text) = system {
             out.push(serde_json::json!({"role": "system", "content": system_text}));
         }
-        
-        // Затем проходим по всем сообщениям из истории
+
+        // Затем проходим по всем сообщениям из истории.
+        // SANITIZER (баг из живого прогона, HTTP 400 "tool message must
+        // follow an assistant message"): после Esc-прерывания/ретрая/
+        // recovery в истории мог остаться tool-результат БЕЗ родительского
+        // assistant с tool_calls — строгие валидаторы (TokenRouter, Nvidia)
+        // такое отклоняют. Осиротевший tool превращаем в user-сообщение.
+        let mut prev_assistant_had_tool_calls = false;
         for msg in messages {
             if msg.role == "system" {
                 continue;
             }
 
             if msg.role == "tool" {
+                if !prev_assistant_had_tool_calls {
+                    // Сирота: валидируем как user — модель всё равно видит
+                    // содержимое результата, а история становится корректной.
+                    out.push(serde_json::json!({
+                        "role": "user",
+                        "content": format!("(результат инструмента) {}", msg.content),
+                    }));
+                    continue;
+                }
                 // Результат вызова инструмента: стандарт требует
                 // tool_call_id, привязывающий ответ к конкретному вызову.
                 out.push(serde_json::json!({
@@ -679,8 +701,17 @@ impl OpenAICompatibleClient {
                     "tool_call_id": msg.tool_call_id.clone().unwrap_or_default(),
                     "content": msg.content,
                 }));
+                // Несколько tool подряд легальны только после ОДНОГО
+                // assistant с несколькими tool_calls — флаг остаётся true
+                // до следующего non-tool сообщения.
                 continue;
             }
+
+            prev_assistant_had_tool_calls = msg
+                .tool_calls
+                .as_ref()
+                .map(|c| !c.is_empty())
+                .unwrap_or(false) && msg.role == "assistant";
 
             match &msg.tool_calls {
                 Some(calls) if !calls.is_empty() => {
