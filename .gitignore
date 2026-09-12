@@ -11,3 +11,4 @@
 test/live-*
 test/results/
 test/pts/
+npm/
