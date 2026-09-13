@@ -64,6 +64,13 @@ fn run_git(shadow: &Path, workdir: &Path, args: &[&str]) -> Result<String, Strin
 
 fn ensure_repo(shadow: &Path, workdir: &Path) -> Result<(), String> {
     if shadow.join("HEAD").exists() {
+        // STALE LOCK (живой инцидент с Windows-прогона): прерывание хода
+        // по Esc/крах в момент git-коммита оставляет index.lock навсегда
+        // — дальше КАЖДЫЙ снапшот падает "File exists", очередь копится,
+        // undo не работает. Git-процессов, легально держащих этот lock
+        // в теневом репо, не бывает (мы единственный писатель, ходы
+        // последовательны), так что мёртвый lock просто удаляем.
+        let _ = std::fs::remove_file(shadow.join("index.lock"));
         // Exclude дописываем и для СУЩЕСТВУЮЩЕГО репо: путь HEPHAESTUS_HOME
         // мог появиться/сместиться относительно work-tree.
         write_excludes(shadow, workdir);

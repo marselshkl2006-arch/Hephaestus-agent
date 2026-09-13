@@ -2655,6 +2655,21 @@ fn draw_ui(
             Span::styled(tail_line.clone(), Style::default().fg(Color::Yellow)),
         ]));
         plain_out.push(format!("⌨ {}", tail_line));
+    } else if busy {
+        // ИНДИКАТОР «МОДЕЛЬ ДУМАЕТ» (живой инцидент: custom-провайдер без
+        // стрима на free-тарифе мог молчать 46+ секунд между tool-шагами
+        // — GLM часто отвечает БЕЗ текста, только tool_calls. Пользователь
+        // видел «пустые вызовы» и не понимал, жив ли агент. Спиннер в
+        // рамке был, но лента чата выглядела замершей: последняя запись
+        // «🔧 ок», и тишина. Эта строка в ленте явно показывает, что ход
+        // идёт и сейчас — LLM-запрос.
+        let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        let frame = frames[spinner_frame % frames.len()];
+        all_lines.push(Line::from(vec![
+            Span::styled(format!("{frame} "), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled("запрос к модели… (Esc — прервать)", Style::default().fg(Color::DarkGray)),
+        ]));
+        plain_out.push("запрос к модели…".to_string());
     }
 
     let inner_height = chunks[chat_idx].height.saturating_sub(2) as usize;

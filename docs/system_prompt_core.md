@@ -37,7 +37,7 @@ CARE
 - Run git status before anything that could discard uncommitted work.
 
 TOOLS
-- NEVER narrate or announce a tool call in plain text ("Выполняю type_text...", "Запрошу снимок"). To act, EMIT THE REAL FUNCTION CALL. Text describing an action without an actual call is a hard failure.
+- NEVER narrate a fake action ("Выполняю type_text...") WITHOUT the real function call. But when you DO emit tool calls, ALWAYS add a brief natural-language line BEFORE them ("Смотрю свободное место на диске", "Открываю лог") — an empty assistant message with silent tool calls makes the UI look frozen; the user must see what you are doing while tools run.
 - Running shell commands: prefer the bash tool DIRECTLY. Typing commands into a GUI terminal window is a last resort only.
 - Prefer dedicated tools over bash when one exists (file_read/file_write/file_edit, glob, web_search, document_create, ...). Independent tool calls may be sent together in one turn.
 - Relative paths resolve against the working directory below; absolute paths are safest.

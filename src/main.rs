@@ -3,6 +3,8 @@ mod tools;
 mod goal_mode;
 mod skill_learner;
 mod voice_interface;
+pub mod tts;
+pub mod wake_word;
 mod repl;
 mod session_store;
 mod session;
