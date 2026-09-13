@@ -350,11 +350,23 @@ async fn run_app(
     let mut sel_end: Option<(usize, usize)> = None;
     let mut mouse_down = false;
     let mut drag_edge: i8 = 0;
+    // Момент последнего Down/Drag-события мыши — для watchdog'а залипшего
+    // drag (терминал потерял Up-эвент → drag_edge торчит ±1 вечно).
+    let mut last_drag_at: Option<std::time::Instant> = None;
     let mut stream_buf = String::new();
     let mut plain_lines: Vec<String> = Vec::new();
     // Геометрия панели чата последнего кадра — для перевода координат
     // мыши в (строка, колонка) БЕЗ пересчёта внутри обработчика событий.
     let mut chat_geom: Option<(u16, u16, u16, u16, usize)> = None; // x,y,w,h,start_idx
+    // КЭШ РЕНДЕРА ИСТОРИИ: draw_ui вызывается каждые 120мс, и раньше
+    // КАЖДЫЙ кадр заново по-символьно пережимал (hard_wrap) ВСЮ историю
+    // — сотни записей × тысячи символов × 8.3 раза/сек. На длинной
+    // сессии (час чистки диска, 100+ записей) это съедало CPU и
+    // портило отзывчивость ввода. Кэш хранит (a) готовые Line'ы истории
+    // и (b) их plain-зеркало; пересчёт — только когда история выросла
+    // или сменилась ширина панели (ресайз терминала). Спиннер/стрим/
+    // прокрутка живут в одном кадре и в кэш не входят.
+    let mut render_cache: Option<(usize, u16, Vec<ratatui::text::Line<'static>>, Vec<String>)> = None; // (entries, width, lines, plain)
 
     let (tx, mut rx) = mpsc::unbounded_channel::<ReplMsg>();
 
@@ -469,6 +481,7 @@ async fn run_app(
                 &stream_buf,
                 &mut plain_lines,
                 &mut chat_geom,
+                &mut render_cache,
                 sel_anchor,
                 sel_end,
             )
@@ -484,6 +497,21 @@ async fn run_app(
                 break;
             }
             _ = tick.tick() => {
+                // WATCHDOG ЗАЛИПШЕГО DRAG: если ЛКМ «зажата» (down без
+                // Up-эвента — терминал потерял его), drag_edge торчит ±1
+                // и автопрокрутка уносит вью КАЖДЫЙ тик. Зажатая мышь
+                // физически шлёт Drag-события непрерывно; тишина ≥2сек
+                // при mouse_down=true значит, что Up потерян — приня-
+                // тельно отпускаем.
+                if mouse_down && drag_edge != 0 {
+                    let stuck = last_drag_at.is_none_or(|t| t.elapsed() >= Duration::from_secs(2));
+                    if stuck {
+                        mouse_down = false;
+                        drag_edge = 0;
+                    }
+                } else {
+                    last_drag_at = None;
+                }
                 if busy || queued_pending > 0 {
                     spinner_frame = (spinner_frame + 1) % SPINNER_FRAMES.len();
                 }
@@ -581,11 +609,13 @@ async fn run_app(
                                         sel_end = sel_anchor;
                                         mouse_down = true;
                                         drag_edge = 0;
+                                        last_drag_at = Some(std::time::Instant::now());
                                     }
                                 }
                             }
                             MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
                                 if mouse_down {
+                                    last_drag_at = Some(std::time::Instant::now());
                                     if let Some((gx, gy, gw, gh, start_idx)) = chat_geom {
                                         let inner_x = gx + 1;
                                         let inner_y = gy + 1;
@@ -624,9 +654,19 @@ async fn run_app(
                                 }
                             }
                             MouseEventKind::ScrollUp => {
+                                // Колесо = пользователь ХОЧЕТ прокрутку. Если
+                                // при этом залип drag (потерян Up-эвент,
+                                // живой инцидент: drag_edge=-1 добавлял
+                                // +3 строки/тик, колесо не мог победить —
+                                // «вниз не листается»), сбрасываем drag:
+                                // колесо физически не является зажатой ЛКМ.
+                                mouse_down = false;
+                                drag_edge = 0;
                                 scroll_from_bottom = scroll_from_bottom.saturating_add(SCROLL_STEP);
                             }
                             MouseEventKind::ScrollDown => {
+                                mouse_down = false;
+                                drag_edge = 0;
                                 scroll_from_bottom = scroll_from_bottom.saturating_sub(SCROLL_STEP);
                             }
                             _ => {}
@@ -818,6 +858,27 @@ async fn run_app(
                                     }
                                     'a' => cursor = 0,
                                     'e' => cursor = input.len(),
+                                    // Ctrl+V — вставка из СИСТЕМНОГО буфера ОС
+                                    // (не путать с bracketed paste терминала:
+                                    // в raw-режиме Ctrl+V — просто 0x16, сам
+                                    // терминал ничего не вставляет).
+                                    'v' => {
+                                        if let Some(text) = paste_from_clipboard() {
+                                            for ch in text.chars() {
+                                                match ch {
+                                                    '\n' | '\r' | '\t' => {
+                                                        input.insert(cursor, ' ');
+                                                        cursor += 1;
+                                                    }
+                                                    c if c.is_control() => {}
+                                                    c => {
+                                                        input.insert(cursor, c);
+                                                        cursor += 1;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
                                     // Остальные control-комбинации (Ctrl+другое) —
                                     // игнорируем, а не вставляем как текст: именно
                                     // слепая вставка контрольных символов и породила баг.
@@ -847,6 +908,27 @@ async fn run_app(
                             }
                             KeyCode::Home => cursor = 0,
                             KeyCode::End => cursor = input.len(),
+                            // Shift+Insert — терминальная классика вставки,
+                            // bracketed paste при этом НЕ срабатывает.
+                            KeyCode::Insert
+                                if key.modifiers.contains(KeyModifiers::SHIFT) =>
+                            {
+                                if let Some(text) = paste_from_clipboard() {
+                                    for ch in text.chars() {
+                                        match ch {
+                                            '\n' | '\r' | '\t' => {
+                                                input.insert(cursor, ' ');
+                                                cursor += 1;
+                                            }
+                                            c if c.is_control() => {}
+                                            c => {
+                                                input.insert(cursor, c);
+                                                cursor += 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             KeyCode::Up => {
                                 if !input_history.is_empty() {
                                     let idx = match history_cursor {
@@ -2364,6 +2446,50 @@ Gtk.main()
     "OSC52"
 }
 
+/// ВСТАВКА ИЗ СИСТЕМНОГО БУФЕРА (Ctrl+V / Shift+Insert) — парная к
+/// copy_via_osc52. BracketedPaste покрывает paste из самого терминала,
+/// но НЕ все терминалы транслируют Ctrl+V в bracketed-paste (в raw-режиме
+/// Ctrl+V — это просто 0x16), а Shift+Insert почти нигде его не даёт.
+/// Читаем реальный системный буфер ОС.
+fn paste_from_clipboard() -> Option<String> {
+    use std::process::{Command, Stdio};
+
+    let read = |mut cmd: Command| -> Option<String> {
+        let out = cmd.stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let s = String::from_utf8_lossy(&out.stdout).trim_end_matches(['\r', '\n']).to_string();
+        if s.is_empty() { None } else { Some(s) }
+    };
+
+    if cfg!(windows) {
+        let mut ps = Command::new("powershell");
+        ps.args(["-NoProfile", "-Command", "Get-Clipboard -Raw"]);
+        return read(ps);
+    }
+    if std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty()) {
+        if let Some(s) = read(Command::new("wl-paste")) {
+            return Some(s);
+        }
+    }
+    if std::env::var_os("DISPLAY").is_some_and(|v| !v.is_empty()) {
+        let mut xc = Command::new("xclip");
+        xc.args(["-selection", "clipboard", "-o"]);
+        if let Some(s) = read(xc) {
+            return Some(s);
+        }
+        let mut xs = Command::new("xsel");
+        xs.args(["--clipboard", "--output"]);
+        if let Some(s) = read(xs) {
+            return Some(s);
+        }
+    }
+    // Headless / без утилит буфера — терминального OSC52-чтения нет,
+    // вставка возможна только bracketed paste самого терминала.
+    None
+}
+
 fn role_style(role: Role) -> (Style, &'static str) {
     match role {
         Role::User => (Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD), "Вы"),
@@ -2456,6 +2582,7 @@ fn draw_ui(
     stream_tail: &str,
     plain_out: &mut Vec<String>,
     geom_out: &mut Option<(u16, u16, u16, u16, usize)>,
+    render_cache: &mut Option<(usize, u16, Vec<ratatui::text::Line<'static>>, Vec<String>)>,
     sel_anchor: Option<(usize, usize)>,
     sel_end: Option<(usize, usize)>,
 ) {
@@ -2577,69 +2704,92 @@ fn draw_ui(
     // вырезается выделенный мышью текст. Заполняется в том же цикле.
     plain_out.clear();
     let mut all_lines: Vec<Line> = Vec::new();
-    for entry in history {
-        let (style, label) = role_style(entry.role);
-        // ИСПРАВЛЕНО: было `entry.text.lines()` без проверки на пустую
-        // строку — `"".lines()` даёт ПУСТОЙ итератор (0 элементов), а не
-        // одну пустую строку, поэтому запись с пустым `text` не рисовала
-        // вообще ничего, даже метку роли/времени. Именно это делало
-        // ответ агента "невидимым" (см. фикс в llm.rs — теперь Ollama
-        // пустой content возвращает как ошибку, а не пустой Ok(...), но
-        // рендер всё равно не должен молчать на пустом тексте в принципе).
-        if entry.text.is_empty() {
-            let plain = format!("[{}] {}: (пустой ответ)", entry.time, label);
-            all_lines.push(Line::from(vec![
-                Span::styled(format!("[{}] ", entry.time), Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("{}: ", label), style),
-                Span::styled("(пустой ответ)", Style::default().fg(Color::DarkGray)),
-            ]));
-            plain_out.push(plain);
+    // КЭШ РЕНДЕРА ИСТОРИИ (см. объявление render_cache в run()): тяжёлый
+    // по-символьный wrap делаем ТОЛЬКО когда история выросла или
+    // сменилась ширина панели (ресайз). Каждый тик (120мс) просто
+    // клонируем готовые Line'ы — клон Span<'static> — это Arc-копия,
+    // не пересборка текста. В dry-run это переводит «сотни записей ×
+    // 8.3 кадра/сек» в «пересборку один раз на новую запись».
+    {
+        let cache_hit = render_cache
+            .as_ref()
+            .is_some_and(|(n, w, _, _)| *n == history.len() && *w == available_width as u16);
+        if cache_hit {
+            let (_, _, cached_lines, cached_plain) = render_cache.as_ref().unwrap();
+            all_lines = cached_lines.clone();
+            plain_out.extend(cached_plain.iter().cloned());
         } else {
-            let prefix_len = format!("[{}] {}: ", entry.time, label).chars().count();
-            let mut is_first_nl_line = true;
-            // Отслеживаем код-блоки для построчной раскраски (```...```),
-            // дифф раскрашивается по префиксам строк.
-            let mut in_code = false;
-            for raw_line in entry.text.lines() {
-                if entry.role == Role::Assistant || entry.role == Role::System {
-                    if raw_line.trim_start().starts_with("```") {
-                        in_code = !in_code;
+            for entry in history {
+                let (style, label) = role_style(entry.role);
+                // ИСПРАВЛЕНО: было `entry.text.lines()` без проверки на пустую
+                // строку — `"".lines()` даёт ПУСТОЙ итератор (0 элементов), а не
+                // одну пустую строку, поэтому запись с пустым `text` не рисовала
+                // вообще ничего, даже метку роли/времени. Именно это делало
+                // ответ агента "невидимым" (см. фикс в llm.rs — теперь Ollama
+                // пустой content возвращает как ошибку, а не пустой Ok(...), но
+                // рендер всё равно не должен молчать на пустом тексте в принципе).
+                if entry.text.is_empty() {
+                    let plain = format!("[{}] {}: (пустой ответ)", entry.time, label);
+                    all_lines.push(Line::from(vec![
+                        Span::styled(format!("[{}] ", entry.time), Style::default().fg(Color::DarkGray)),
+                        Span::styled(format!("{}: ", label), style),
+                        Span::styled("(пустой ответ)", Style::default().fg(Color::DarkGray)),
+                    ]));
+                    plain_out.push(plain);
+                } else {
+                    let prefix_len = format!("[{}] {}: ", entry.time, label).chars().count();
+                    let mut is_first_nl_line = true;
+                    // Отслеживаем код-блоки для построчной раскраски (```...```),
+                    // дифф раскрашивается по префиксам строк.
+                    let mut in_code = false;
+                    for raw_line in entry.text.lines() {
+                        if entry.role == Role::Assistant || entry.role == Role::System {
+                            if raw_line.trim_start().starts_with("```") {
+                                in_code = !in_code;
+                            }
+                        }
+                        let base_style = if entry.role == Role::Diff {
+                            diff_line_style(raw_line)
+                        } else if entry.role == Role::Assistant || entry.role == Role::System {
+                            content_line_style(raw_line, in_code)
+                        } else {
+                            Style::default()
+                        };
+                        let this_width = if is_first_nl_line {
+                            available_width.saturating_sub(prefix_len).max(1)
+                        } else {
+                            available_width.saturating_sub(cont_indent_len).max(1)
+                        };
+                        let pieces = hard_wrap(raw_line, this_width);
+                        for (j, piece) in pieces.into_iter().enumerate() {
+                            if is_first_nl_line && j == 0 {
+                                all_lines.push(Line::from(vec![
+                                    Span::styled(format!("[{}] ", entry.time), Style::default().fg(Color::DarkGray)),
+                                    Span::styled(format!("{}: ", label), style),
+                                    Span::styled(piece.clone(), base_style),
+                                ]));
+                                plain_out.push(format!("[{}] {}: {}", entry.time, label, piece));
+                            } else {
+                                all_lines.push(Line::from(vec![Span::styled(
+                                    format!("{}{}", continuation_indent, piece),
+                                    base_style,
+                                )]));
+                                plain_out.push(format!("{}{}", continuation_indent, piece));
+                            }
+                        }
+                        is_first_nl_line = false;
                     }
                 }
-                let base_style = if entry.role == Role::Diff {
-                    diff_line_style(raw_line)
-                } else if entry.role == Role::Assistant || entry.role == Role::System {
-                    content_line_style(raw_line, in_code)
-                } else {
-                    Style::default()
-                };
-                let this_width = if is_first_nl_line {
-                    available_width.saturating_sub(prefix_len).max(1)
-                } else {
-                    available_width.saturating_sub(cont_indent_len).max(1)
-                };
-                let pieces = hard_wrap(raw_line, this_width);
-                for (j, piece) in pieces.into_iter().enumerate() {
-                    if is_first_nl_line && j == 0 {
-                        all_lines.push(Line::from(vec![
-                            Span::styled(format!("[{}] ", entry.time), Style::default().fg(Color::DarkGray)),
-                            Span::styled(format!("{}: ", label), style),
-                            Span::styled(piece.clone(), base_style),
-                        ]));
-                        plain_out.push(format!("[{}] {}: {}", entry.time, label, piece));
-                    } else {
-                        all_lines.push(Line::from(vec![Span::styled(
-                            format!("{}{}", continuation_indent, piece),
-                            base_style,
-                        )]));
-                        plain_out.push(format!("{}{}", continuation_indent, piece));
-                    }
-                }
-                is_first_nl_line = false;
+                all_lines.push(Line::from(""));
+                plain_out.push(String::new());
             }
+            *render_cache = Some((
+                history.len(),
+                available_width as u16,
+                all_lines.clone(),
+                plain_out.clone(),
+            ));
         }
-        all_lines.push(Line::from(""));
-        plain_out.push(String::new());
     }
 
     // ЖИВОЙ СТРИМ: хвост генерируемого текста прямо в ленте чата —
