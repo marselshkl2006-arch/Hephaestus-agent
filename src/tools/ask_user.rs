@@ -80,6 +80,11 @@ impl Tool for AskUserTool {
         }
     }
 
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type":"object","properties":{"question":{"type":"string"}},"required":["question"]})
+    }
+
     fn name(&self) -> &'static str {
         "ask_user"
     }

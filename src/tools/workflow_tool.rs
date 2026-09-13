@@ -83,6 +83,17 @@ impl Tool for WorkflowRunTool {
         }
     }
 
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+  "type": "object",
+  "properties": {
+    "steps": {"type": "array", "items": {"type": "object", "properties": {"tool": {"type": "string"}, "args": {"type": "object"}}, "required": ["tool"]}}
+  },
+  "required": ["steps"]
+})
+    }
+
     fn name(&self) -> &'static str {
         "workflow_run"
     }

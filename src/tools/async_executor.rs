@@ -53,6 +53,17 @@ impl Tool for ParallelExecTool {
         }
     }
 
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+  "type": "object",
+  "properties": {
+    "calls": {"type": "array", "items": {"type": "object", "properties": {"tool": {"type": "string", "description": "Имя инструмента"}, "args": {"type": "object", "description": "Аргументы вызова"}}, "required": ["tool"]}}
+  },
+  "required": ["calls"]
+})
+    }
+
     fn name(&self) -> &'static str {
         "parallel_exec"
     }

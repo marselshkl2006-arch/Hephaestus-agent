@@ -54,6 +54,11 @@ impl Tool for ConfigGetTool {
             None => ToolResult::success(serde_json::to_string_pretty(&data).unwrap_or_default()),
         }
     }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type":"object","properties":{"key":{"type":"string"},"value":{"type":"string"}},"required":["key"]})
+    }
+
     fn name(&self) -> &'static str {
         "config_get"
     }

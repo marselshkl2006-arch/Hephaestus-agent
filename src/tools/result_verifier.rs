@@ -94,6 +94,11 @@ impl Tool for VerifyResultTool {
         }
     }
 
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type":"object","properties":{"checks":{"type":"array","items":{"type":"string"}}},"required":["checks"]})
+    }
+
     fn name(&self) -> &'static str {
         "verify_result"
     }

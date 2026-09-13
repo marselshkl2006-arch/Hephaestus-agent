@@ -120,6 +120,11 @@ impl Tool for RunTestsTool {
         }
     }
 
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type":"object","properties":{"runner":{"type":"string","description":"cargo | npm | pytest | go"},"directory":{"type":"string"}}})
+    }
+
     fn name(&self) -> &'static str {
         "run_tests"
     }

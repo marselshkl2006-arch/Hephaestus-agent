@@ -350,18 +350,35 @@ impl PermissionManager {
         print!("Разрешить? [y] один раз / [a] всегда для '{}' / [n] нет: ", always_key);
         let _ = io::stdout().flush();
 
-        let mut answer = String::new();
-        let read = std::io::stdin().read_line(&mut answer);
-        match read {
-            Ok(_) => match answer.trim().to_lowercase().as_str() {
-                "y" | "yes" | "д" | "да" | "1" => Outcome::Granted,
-                "a" | "always" | "в" | "всегда" | "2" => {
-                    self.remember_always(always_key);
-                    Outcome::Granted
-                }
-                _ => Outcome::Denied,
-            },
-            Err(_) => Outcome::Denied,
+        // ФИКС (живой прогон one-shot на Windows через SSH): раньше
+        // read_line висел ВЕЧНО, если stdin живой, но ввода нет (запуск
+        // из скрипта/SSH/CI) — ход агента зависал («инструменты не
+        // выполняются»). Читаем в отдельном потоке; ждём ответ по каналу
+        // с таймаутом 60 сек — EOF/таймаут = отказ с внятной причиной.
+        // Интерактивный пользователь по-прежнему успевает ответить.
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            let mut buf = String::new();
+            let line = match std::io::stdin().read_line(&mut buf) {
+                Ok(_) => buf,
+                Err(_) => String::new(),
+            };
+            let _ = tx.send(line);
+        });
+        let answer = match rx.recv_timeout(std::time::Duration::from_secs(60)) {
+            Ok(line) => line,
+            Err(_) => {
+                println!("   ⏳ Ответа нет 60 сек (или stdin закрыт) — отклоняю. Для headless-запусков задайте [[permissions.rules]] в config.toml.");
+                String::new()
+            }
+        };
+        match answer.trim().to_lowercase().as_str() {
+            "y" | "yes" | "д" | "да" | "1" => Outcome::Granted,
+            "a" | "always" | "в" | "всегда" | "2" => {
+                self.remember_always(always_key);
+                Outcome::Granted
+            }
+            _ => Outcome::Denied,
         }
     }
 

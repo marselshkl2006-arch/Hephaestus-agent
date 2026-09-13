@@ -28,6 +28,11 @@ impl Tool for SkillListTool {
             Err(_) => ToolResult::error("skill_learner mutex poisoned"),
         }
     }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type":"object","properties":{"query":{"type":"string"},"goal":{"type":"string"},"top_k":{"type":"integer"}}})
+    }
+
     fn name(&self) -> &'static str {
         "skill_list"
     }

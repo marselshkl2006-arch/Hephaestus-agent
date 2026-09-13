@@ -69,6 +69,21 @@ impl Tool for WorktreeTool {
         }
     }
 
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+  "type": "object",
+  "properties": {
+    "action": {"type": "string", "description": "list | create | delete | prune"},
+    "path": {"type": "string", "description": "Путь основной рабочей копии"},
+    "branch": {"type": "string"},
+    "repo_dir": {"type": "string"},
+    "force": {"type": "boolean"}
+  },
+  "required": ["action"]
+})
+    }
+
     fn name(&self) -> &'static str {
         "worktree"
     }

@@ -111,6 +111,11 @@ impl Tool for WebFetchTool {
         ToolResult::success(truncate(&text, MAX_OUTPUT_CHARS))
     }
 
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type":"object","properties":{"url":{"type":"string"},"query":{"type":"string"},"max_results":{"type":"integer"}}})
+    }
+
     fn name(&self) -> &'static str {
         "web_fetch"
     }

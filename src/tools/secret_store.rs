@@ -69,6 +69,11 @@ impl Tool for SecretSetTool {
             Err(e) => ToolResult::error(format!("Ошибка сохранения: {}", e)),
         }
     }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type":"object","properties":{"key":{"type":"string"},"value":{"type":"string"}},"required":["key"]})
+    }
+
     fn name(&self) -> &'static str {
         "secret_set"
     }
