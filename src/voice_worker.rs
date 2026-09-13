@@ -117,6 +117,11 @@ pub async fn spawn_voice_worker(
     if voice_state() != VoiceWorkerState::Off {
         return; // уже жив
     }
+    // Модель: SMALL (уже в кэше ~/.local/share/kalosm — 925MB, качать
+    // не надо; tiny пробовали — huggingface отдаёт 3.6KB/s, 5 часов).
+    // Small грузится ~45с при старте — это цена первого /voice on за
+    // сессию, зато качество распознавания команд заметно выше, а
+    // wake_word::parse_utterance всё равно терпит опечатки (Левенштейн).
     let vi = crate::voice_interface::create_voice_interface(agent.clone(), None, None, None, None, false);
     let tx_info = tx.clone();
     let _ = tx_info.send(ReplMsg::Update(HistoryEntry::new(
@@ -171,51 +176,61 @@ pub async fn spawn_voice_worker(
             let err_cb = mic_err.clone();
             let cfg_clone = cfg.clone();
             // device тоже не Send — НО его можно получить заново в треде.
+            // std::panic::catch_unwind: паника ЗДЕСЬ не должна убивать
+            // весь процесс (TUI живёт своей жизнью) и не должна печатать
+            // поверх raw-терминала — перехватываем и кладём в err_cb.
             std::thread::spawn(move || {
-                let host = cpal::default_host();
-                let Some(device) = host.default_input_device() else {
-                    *err_cb.lock().unwrap() = Some("нет устройства ввода".into());
-                    return;
-                };
-                let build = device.build_input_stream(
-                    &cfg_clone.into(),
-                    move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                        if stop_cb.load(std::sync::atomic::Ordering::Relaxed) {
-                            return;
-                        }
-                        // Микс в mono.
-                        let mut mono = Vec::with_capacity(data.len() / channels.max(1));
-                        for frame in data.chunks(channels.max(1)) {
-                            let s = frame.iter().sum::<f32>() / channels as f32;
-                            mono.push(s.clamp(-1.0, 1.0));
-                        }
-                        let mut r = ring_cb.lock().unwrap();
-                        let w = widx_cb.load(std::sync::atomic::Ordering::Relaxed);
-                        for (i, s) in mono.iter().enumerate() {
-                            r[(w + i) % ring_cap] = *s;
-                        }
-                        widx_cb.store((w + mono.len()) % ring_cap, std::sync::atomic::Ordering::Relaxed);
-                        tw_cb.fetch_add(mono.len(), std::sync::atomic::Ordering::Relaxed);
-                    },
-                    |_err| {},
-                    None,
-                );
-                match build {
-                    Ok(s) => {
-                        if s.play().is_ok() {
-                            ok_cb.store(true, std::sync::atomic::Ordering::Relaxed);
-                            // Держим стрим живым, пока не попросят стоп.
-                            while !stop_wait.load(std::sync::atomic::Ordering::Relaxed) {
-                                std::thread::sleep(std::time::Duration::from_millis(100));
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let host = cpal::default_host();
+                    let Some(device) = host.default_input_device() else {
+                        *err_cb.lock().unwrap() = Some("нет устройства ввода".into());
+                        return;
+                    };
+                    let build = device.build_input_stream(
+                        &cfg_clone.into(),
+                        move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                            if stop_cb.load(std::sync::atomic::Ordering::Relaxed) {
+                                return;
                             }
-                            drop(s);
-                        } else {
-                            *err_cb.lock().unwrap() = Some("stream.play() не удался".into());
+                            // Микс в mono.
+                            let mut mono = Vec::with_capacity(data.len() / channels.max(1));
+                            for frame in data.chunks(channels.max(1)) {
+                                let s = frame.iter().sum::<f32>() / channels as f32;
+                                mono.push(s.clamp(-1.0, 1.0));
+                            }
+                            let mut r = ring_cb.lock().unwrap();
+                            let w = widx_cb.load(std::sync::atomic::Ordering::Relaxed);
+                            for (i, s) in mono.iter().enumerate() {
+                                r[(w + i) % ring_cap] = *s;
+                            }
+                            widx_cb.store((w + mono.len()) % ring_cap, std::sync::atomic::Ordering::Relaxed);
+                            tw_cb.fetch_add(mono.len(), std::sync::atomic::Ordering::Relaxed);
+                        },
+                        |_err| {},
+                        None,
+                    );
+                    match build {
+                        Ok(s) => {
+                            if s.play().is_ok() {
+                                ok_cb.store(true, std::sync::atomic::Ordering::Relaxed);
+                                // Держим стрим живым, пока не попросят стоп.
+                                while !stop_wait.load(std::sync::atomic::Ordering::Relaxed) {
+                                    std::thread::sleep(std::time::Duration::from_millis(100));
+                                }
+                                drop(s);
+                            } else {
+                                *err_cb.lock().unwrap() = Some("stream.play() не удался".into());
+                            }
+                        }
+                        Err(e) => {
+                            *err_cb.lock().unwrap() = Some(format!("{e}"));
                         }
                     }
-                    Err(e) => {
-                        *err_cb.lock().unwrap() = Some(format!("{e}"));
-                    }
+                }));
+                if result.is_err() {
+                    *err_cb.lock().unwrap() =
+                        Some("паника в микрофонном треде (cpal/candle)".into());
+                    crate::logging_system::warning("[voice] паника в микрофонном треде — перехвачена");
                 }
             });
         }
@@ -449,5 +464,111 @@ async fn transcribe_and_dispatch(
             )));
         }
         None => {} // без активатора — игнор (телевизор не рулит агентом)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// VAD-порог на синтетике: тишина не должна считаться речью.
+    #[test]
+    fn vad_silence_not_speech() {
+        let silence = vec![0.0f32; 4410]; // 0.1с @ 44.1к
+        let rms = (silence.iter().map(|s| s * s).sum::<f32>() / silence.len() as f32).sqrt();
+        assert!(rms <= VAD_RMS_THRESHOLD, "тишина {rms} не должна проходить VAD");
+    }
+
+    /// Громкий тон — речь по VAD.
+    #[test]
+    fn vad_tone_is_speech() {
+        let tone: Vec<f32> = (0..4410).map(|i| (i as f32 * 0.05).sin() * 0.5).collect();
+        let rms = (tone.iter().map(|s| s * s).sum::<f32>() / tone.len() as f32).sqrt();
+        assert!(rms > VAD_RMS_THRESHOLD, "тон {rms} должен проходить VAD");
+    }
+
+    /// Кольцо: drain_phrase достаёт последние сэмплы по порядку.
+    #[test]
+    fn drain_phrase_returns_tail() {
+        let cap = 1000;
+        let data: Vec<f32> = (0..cap / 2).map(|i| 0.1 * (i as f32 / 10.0).sin()).collect();
+        // Заполняем кольцо половиной, потом ещё: tail должен быть концом.
+        let ring = Arc::new(std::sync::Mutex::new(vec![0.0f32; cap]));
+        let widx = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        {
+            let mut r = ring.lock().unwrap();
+            for (i, s) in data.iter().enumerate() {
+                r[i % cap] = *s;
+            }
+            widx.store(data.len() % cap, std::sync::atomic::Ordering::Relaxed);
+        }
+        let sr = 100; // 6 «сек» = 600 сэмплов < cap
+        let tail = drain_phrase(&ring, cap, &widx, sr).unwrap();
+        assert_eq!(tail.len(), 600);
+        // Хвост кольца — последние 600 сэмплов data (там ненулевые синусы).
+        assert!(tail.iter().any(|s| s.abs() > 1e-4));
+    }
+
+    /// WAV-путь: hound пишет/читает (конвейер rwhisper-транскрибации
+    /// требует валидный WAV; smoke на сам энкодер).
+    #[test]
+    fn wav_roundtrip_valid() {
+        let tmp = std::env::temp_dir().join("heph_vad_test.wav");
+        let mut w = hound::WavWriter::create(&tmp, hound::WavSpec {
+            channels: 1, sample_rate: 16000, bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        }).unwrap();
+        for i in 0..16000 {
+            let s = ((i as f32) * 0.05).sin() * 0.3;
+            w.write_sample((s * i16::MAX as f32) as i16).unwrap();
+        }
+        w.finalize().unwrap();
+        let mut r = hound::WavReader::open(&tmp).unwrap();
+        assert_eq!(r.duration(), 16000, "длительность должна совпасть");
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+#[cfg(test)]
+mod live_tests {
+    /// ЖИВОЙ прогон (cargo test --release -- --ignored): транскрибация
+    /// тишины напрямую через rwhisper — тот же путь, что в
+    /// VoiceInterface::transcribe (ensure_whisper → transcribe).
+    #[tokio::test]
+    #[ignore]
+    async fn whisper_live_transcribe_silence() {
+        use futures_util::StreamExt;
+        use rwhisper::{Whisper, WhisperBuilder, WhisperSource};
+        let t0 = std::time::Instant::now();
+        let model = Whisper::builder()
+            .with_source(WhisperSource::Tiny)
+            .build()
+            .await
+            .expect("модель Whisper должна загрузиться (кэш ~/.local/share/kalosm)");
+        println!("модель загрузилась за {:?}", t0.elapsed());
+
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut w = hound::WavWriter::new(std::io::Cursor::new(&mut buf), hound::WavSpec {
+                channels: 1, sample_rate: 16000, bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            }).unwrap();
+            for i in 0..16000 {
+                // Не идеальная тишина — лёгкий шум, реалистичнее.
+                let s = ((i % 7) as f32 - 3.0) * 0.001;
+                w.write_sample((s * i16::MAX as f32) as i16).unwrap();
+            }
+            w.finalize().unwrap();
+        }
+        let t1 = std::time::Instant::now();
+        let dec = rodio::Decoder::new(std::io::Cursor::new(buf))
+            .expect("rodio должен декодировать наш WAV");
+        let mut task = model.transcribe(dec);
+        let mut text = String::new();
+        while let Some(seg) = task.next().await {
+            text.push_str(seg.text().trim());
+        }
+        println!("транскрипт: '{text}' за {:?} — КОНВЕЙЕР РАБОТАЕТ", t1.elapsed());
+        assert!(t1.elapsed().as_secs() < 60, "тишина 1с не должна распознаваться дольше минуты");
     }
 }
