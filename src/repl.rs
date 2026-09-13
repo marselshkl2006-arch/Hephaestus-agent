@@ -89,7 +89,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("providers", "список провайдеров"),
     ("model", "[имя] — сменить модель / показать доступные"),
     ("models", "показать доступные модели"),
-    ("voice", "голосовой режим"),
+    ("voice", "on|off|tts|wake|status — голосовой ввод (активатор «Гефест») и озвучка"),
     ("telegram", "запустить Telegram-бота в фоне на этом же диалоге"),
     ("goal", "<текст> — режим достижения цели"),
     ("tools", "список инструментов"),
@@ -106,7 +106,7 @@ const COMMANDS: &[(&str, &str)] = &[
 ];
 
 #[derive(Clone, Copy, PartialEq)]
-enum Role {
+pub(crate) enum Role {
     User,
     Assistant,
     System,
@@ -117,14 +117,14 @@ enum Role {
 }
 
 #[derive(Clone)]
-struct HistoryEntry {
+pub(crate) struct HistoryEntry {
     role: Role,
     text: String,
     time: String,
 }
 
 impl HistoryEntry {
-    fn new(role: Role, text: impl Into<String>) -> Self {
+    pub(crate) fn new(role: Role, text: impl Into<String>) -> Self {
         Self {
             role,
             text: text.into(),
@@ -134,7 +134,7 @@ impl HistoryEntry {
 }
 
 /// Сообщение из фонового `tokio::spawn`-таска в главный цикл TUI.
-enum ReplMsg {
+pub(crate) enum ReplMsg {
     /// Финальный результат долгой операции (результат /provider или /model)
     /// — снимает флаг `busy`.
     Done(HistoryEntry),
@@ -536,6 +536,10 @@ async fn run_app(
                         busy = false;
                         stream_buf.clear();
                         let is_reply = entry.role == Role::Assistant;
+                        // TTS-озвучка ответа (если /voice tts включён).
+                        if is_reply {
+                            crate::voice_worker::speak_reply(&entry.text).await;
+                        }
                         history.push(entry);
                         scroll_from_bottom = 0;
 
@@ -557,6 +561,10 @@ async fn run_app(
                         stream_buf.clear();
                         queued_pending = queued_pending.saturating_sub(1);
                         let _is_reply = entry.role != Role::Error;
+                        // TTS-озвучка ответа хода (если /voice tts включён).
+                        if entry.role != Role::Error {
+                            crate::voice_worker::speak_reply(&entry.text).await;
+                        }
                         history.push(entry);
                         scroll_from_bottom = 0;
                         // Автосохранение после каждого завершённого хода.
@@ -739,9 +747,21 @@ async fn run_app(
                                     continue;
                                 }
 
-                                if line == "/voice" {
-                                    input_history.push(line);
-                                    run_voice_mode(terminal, &agent, &mut history).await;
+                                // ГОЛОС КАК ФОНОВЫЙ ВОРКЕР (план переработки
+                                // интерфейса, п.1): никаких выходов из TUI —
+                                // /voice on запускает воркер, который сам
+                                // кладёт распознанные команды в общую
+                                // очередь ходов. Старый run_voice_mode с
+                                // LeaveAlternateScreen умер.
+                                if line == "/voice" || line.starts_with("/voice ") {
+                                    input_history.push(line.clone());
+                                    let arg = line.strip_prefix("/voice").unwrap_or("").trim().to_string();
+                                    let queue = queue.clone();
+                                    let agent_v = agent.clone();
+                                    let tx_v = tx.clone();
+                                    tokio::spawn(async move {
+                                        handle_voice_cmd(&arg, agent_v, queue, tx_v).await;
+                                    });
                                     continue;
                                 }
 
@@ -1011,25 +1031,54 @@ async fn run_app(
 /// приводит к дедлоку, но и не идеальная практика — если когда-нибудь
 /// понадобится единственный поток исполнителя, `run_loop()` надо будет
 /// переписать на `tokio::task::spawn_blocking` для чтения stdin.
-async fn run_voice_mode(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    agent: &Arc<Mutex<Agent>>,
-    history: &mut Vec<HistoryEntry>,
+/// /voice — управление фоновым голосовым воркером (план переработки
+/// интерфейса, п.1: голос живёт ВНУТРИ TUI, терминал не покидается).
+/// Подкоманды:
+///   /voice            — статус (что слушает, TTS вкл/выкл);
+///   /voice on         — запустить воркер (VAD + Whisper + «Гефест»);
+///   /voice off        — остановить;
+///   /voice tts        — переключить озвучку ответов;
+///   /voice wake       — тест распознавания активатора (без агента).
+async fn handle_voice_cmd(
+    arg: &str,
+    agent: Arc<Mutex<Agent>>,
+    queue: Arc<crate::request_queue::RequestQueue>,
+    tx: mpsc::UnboundedSender<ReplMsg>,
 ) {
-    let _ = disable_raw_mode();
-    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture, DisableBracketedPaste);
-    let _ = terminal.show_cursor();
-    println!("\n(Голосовой режим — говорите 'exit' или 'quit', чтобы вернуться в TUI)\n");
-    let _ = io::stdout().flush();
-
-    let voice = crate::voice_interface::create_voice_interface(agent.clone(), None, None, None, None, false);
-    voice.run_loop().await;
-
-    let _ = enable_raw_mode();
-    let mut stdout = io::stdout();
-    let _ = execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste);
-    let _ = terminal.clear();
-    history.push(HistoryEntry::new(Role::System, "Возврат из голосового режима."));
+    let say = |text: String| {
+        let _ = tx.send(ReplMsg::Update(HistoryEntry::new(Role::System, text)));
+    };
+    match arg {
+        "" | "status" => {
+            use crate::voice_worker::{tts_enabled, voice_state};
+            let st = match voice_state() {
+                crate::voice_worker::VoiceWorkerState::Off => "остановлен".to_string(),
+                crate::voice_worker::VoiceWorkerState::Listening => "🎙 слушает активатор «Гефест»".to_string(),
+                crate::voice_worker::VoiceWorkerState::Transcribing => "⏳ распознаёт фразу".to_string(),
+            };
+            say(format!(
+                "🎤 Голос: {st} │ TTS-ответы: {} │ движок TTS: {}\n/voice on|off — воркер · /voice tts — озвучка ответов · говори: «Гефест, <команда>»",
+                if tts_enabled() { "вкл" } else { "выкл" },
+                if crate::tts::tts_available() { "доступен" } else { "не найден (Windows: SAPI; Linux: piper/espeak-ng)" },
+            ));
+        }
+        "on" | "start" => {
+            crate::voice_worker::send_cmd(crate::voice_worker::VoiceCmd::Start(tx.clone()));
+            crate::voice_worker::spawn_voice_worker(agent, queue, tx).await;
+        }
+        "off" | "stop" => {
+            crate::voice_worker::send_cmd(crate::voice_worker::VoiceCmd::Stop);
+        }
+        "tts" => {
+            crate::voice_worker::send_cmd(crate::voice_worker::VoiceCmd::TtsToggle);
+        }
+        "wake" => {
+            say("🎤 Скажи в микрофон: «Гефест, проверь статус» — воркер должен показать «🎤 <команда>» и поставить ход в очередь. Если тишина: /voice off → /voice on (Whisper догружается при первом запуске ~30сек).".to_string());
+        }
+        _ => {
+            say("Использование: /voice [on|off|tts|wake|status]".to_string());
+        }
+    }
 }
 
 /// Хук прогресса инструментов: Agent::chat вызывает его после каждого
